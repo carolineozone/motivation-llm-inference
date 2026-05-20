@@ -1,0 +1,3399 @@
+---
+title: "Master Thesis"
+author: "Caroline Müller"
+format:
+  html:
+    code-fold: true
+    code-summary: "Show code"
+    code-tools: true
+    toc: true
+    #embed-resources: true
+    self-contained: true   # embed-resources: true
+    fig-cap-location: top
+date: "2026-05-14"
+editor:
+  markdown:
+    wrap: 72
+knitr:
+  opts_chunk:
+    dpi: 300
+---
+
+# 1 Codebook & Research Questions
+
+## 1.1 Research Questions
+
+
+RQ2: Using AI surrogates, how does the amount of textual information affect between-surrogate variability in LLM scores and their correspondence with questionnaire scores?
+
+- RQ2a (Between-Surrogate Variability): To what extent do text length and number of texts affect between-surrogate variability (SD) in LLM scores per basic need satisfaction dimension?
+
+- RQ2b (Correspondence): To what extent do text length and number of texts affect the magnitude of correlations between LLM scores and questionnaire scores per basic need satisfaction dimension?
+
+RQ3: To what extent do AI surrogate outputs resemble those of human participants in terms of textual properties, score distributions, and LLM–questionnaire correspondence?
+
+- RQ3a (Distributional Equivalence): To what extent do distributional properties (mean, SD) of LLM scores differ between AI surrogate and human participant data? 
+- RQ3b (Correspondence): To what extent do correlations between LLM scores and questionnaire scores per basic need satisfaction differ between AI surrogate and human participant data? 
+
+
+## 1.2 Code Book
+
+- id: participant id
+- id_type: participant type, values "AI" or "HU"
+- llm_aut_mean | Mean LLM-scored Autonomy across 3 repeated prompts, based on text. | Numeric | 1 (Low) to 5 (High) |
+- llm_com_mean | Mean LLM-scored Competence across 3 repeated prompts, based on text. | Numeric | 1 (Low) to 5 (High) |
+- llm_rel_mean | Mean LLM-scored Relatedness across 3 repeated prompts, based on text. | Numeric | 1 (Low) to 5 (High) |
+- q_aut_mean | Mean of 4 items measuring self-reported Autonomy need satisfaction | Numeric | 1 (Low) to 5 (High) |
+- q_com_mean | Mean of 4 items measuring self-reported Competence need satisfaction | Numeric | 1 (Low) to 5 (High) |
+- q_rel_mean | Mean of 4 (humans: 5) items measuring self-reported Relatedness need satisfaction | Numeric | 1 (Low) to 5 (High) |
+- actual_words
+
+
+
+# 2 Preparation (cleaning, libraries, global variables)
+
+2.1 Software Environment
+
+The analysis is conducted using the tidyverse framework for data
+manipulation and the psych and performance packages for psychometric
+validation. Tables are rendered according to APA 7th edition standards
+using flextable and rempsyc.
+
+```{r}
+
+#| label: setup-environment
+#| include: false
+#| warning: false
+
+# 1. Clean environment ---------------------------------------------------------
+graphics.off()
+
+# 2. Load libraries ------------------------------------------------------------
+# Note: suppressPackageStartupMessages hides the "attach" noise from the console
+suppressPackageStartupMessages({
+  library(dplyr)
+  library(ggplot2)      
+  library(tidyr)
+  library(flextable)
+  library(rempsyc)    
+  library(scales)       
+  library(psych)
+  library(performance) 
+  library(officer)
+  library(paletteer)
+  library(janitor)
+  library(extrafont)
+  library(car)          # leveneTest for variance equality tests
+  library(boot)         # boot() for bootstrapped CIs
+  library(ggridges)     # ridgeline plots
+
+})
+
+# 3. Set seed for bootstrap CIs ------------------------------------------------
+set.seed(2026)
+
+# 4. Message output ------------------------------------------------------------
+message("Environment cleaned and libraries loaded successfully.")
+
+```
+
+2.2 Global Study Parameters
+
+```{r}
+
+#| label: study-parameters
+
+# Target sample was calculated using a simulation
+TARGET_SAMPLE <- 400
+
+# Bootstrap iterations — set low for development runs
+# TODO before submission: raise to 5000+ (RQ2 uses 10000 for consistency)
+BOOTSTRAP_SAMPLES <- 10000
+if (BOOTSTRAP_SAMPLES < 1000) warning(
+  "BOOTSTRAP_SAMPLES is low (", BOOTSTRAP_SAMPLES, "). Raise before final render."
+)
+
+
+# Font and colors
+THESIS_FONT <- "Calibri"
+THESIS_FONTSIZE <- 11
+THESIS_PALETTE <- "nationalparkcolors::Acadia"
+
+# Define custom palettes
+COLOR_AI <- c("Autonomy" = "#084594", "Competence" = "#4292c6", "Relatedness" = "#9ecae1")
+COLOR_HU <- c("Autonomy" = "#800026", "Competence" = "#e31a1c", "Relatedness" = "#fcbba1")
+
+# Combine for scale_fill_manual
+COLORS <- c(COLOR_HU, COLOR_AI)
+
+
+# not yet used
+COL_AI_SINGLE = "#1F5A71"
+COL_HU_SINGLE = "#BE2A16"
+COL_NEUTRAL_SINGLE = "#B3B3B3"
+COL_GRID = "#E6E6E6"
+COL_LBL_INSIDE = "#FFFFFF"
+COL_LBL_OUTSIDE = "#B3B3B3"# ? 
+
+
+COL_DIFF = "#DDA613"
+#COL_AI_SHADES = c("#0A5D83", "#2085AB", "#489CC1", "#6DBCE0", "#87D3ED")
+#USED: 
+COL_AI_SHADES = c("#1F5A71", "#2085AB", "#489CC1", "#6DBCE0", "#9ecae1","#FFFFFF")
+COL_HU_SHADES = c("#BE2A16", "#CE5545", "#DC7D71", "#E9A39B", "#F5C9C5","#FFFFFF")
+
+COL_AI_SHADES2 = c("#98A33E", "#B2BB61", "#CCD485", "#E6ECA9", "#F3F6D4","#FFFFFF")
+
+
+COL_AI_LINE = COL_AI_SHADES[1]
+COL_HU_LINE = COL_HU_SHADES[1]
+
+COL_AI_LLM = COL_AI_SHADES[1]
+COL_AI_Q = COL_AI_SHADES2[1]
+
+# 4. AI surrogates colors  -----------------------------------------------------
+
+# used as shades for the 3 text lengths
+COL_AI_TEXTS = c("1" = COL_AI_SHADES[4], "3" = COL_AI_SHADES[2], "5" = COL_AI_SHADES[1])
+
+# used as shades for the 3 target word lengths
+COL_AI_WORDS = c("50" = COL_AI_SHADES[4], "150" = COL_AI_SHADES[2], "300" = COL_AI_SHADES[1])
+
+# 5. LABELS --------------------------------------------------------------------
+
+# Labels for the basic psychological needs
+AUT <- "autonomy"
+COM <- "competence"
+REL <- "relatedness"
+
+TABLE_LABEL_AUT <- "Autonomy"
+TABLE_LABEL_COM <- "Competence"
+TABLE_LABEL_REL <- "Relatedness"
+#NEEDS <- c(TABLE_LABEL_AUT, TABLE_LABEL_COM, TABLE_LABEL_REL)
+#ITEMS <- paste0(rep(NEEDS, each = 4), " ", 1:4) # Generate the labels
+
+# Labels for LLM vs Questionnaire comparison
+LABEL_WORDC      <- "Word Count (LLM)"
+LABEL_NEEDS <- paste("Need Dimension")
+LABEL_LLM_AUT <- paste("LLM", TABLE_LABEL_AUT)
+LABEL_LLM_COM <- paste("LLM", TABLE_LABEL_COM)
+LABEL_LLM_REL <- paste("LLM", TABLE_LABEL_REL)
+LABEL_Q_AUT   <- paste("Questionnaire", TABLE_LABEL_AUT)
+LABEL_Q_COM   <- paste("Questionnaire", TABLE_LABEL_COM)
+LABEL_Q_REL   <- paste("Questionnaire", TABLE_LABEL_REL)
+
+# Labels for samples
+LABEL_SAMPLE <- "Sample"
+LABEL_AI <- "AI surrogates"
+LABEL_HU <- "Humans"
+
+# Confidence interval level
+CI_LEVEL <- .95
+CI_LABEL <- paste0(CI_LEVEL * 100, "% CI")
+
+```
+
+2.3 Helper functions
+
+For APA7 styling.
+
+```{r}
+
+#| label: helper-functions
+#| include: false
+
+# Define a standard APA 7 style for this thesis --------------------------------
+style_apa7 <- function(x) {
+  x |>
+    font(fontname = THESIS_FONT, part = "all") |>
+    fontsize(size = THESIS_FONTSIZE, part = "all") |>
+    valign(valign = "top", part = "body") |>
+    set_table_properties(layout = "autofit")
+}
+
+# Generic APA note helper (refined for internal use) ---------------------------
+add_apa_note <- function(x, note_text) {
+  x |>
+    add_footer_lines("") |>
+    mk_par(
+      part = "footer", i = 1, j = 1,
+      value = as_paragraph(
+        as_chunk("Note. ", props = fp_text_default(italic = TRUE,
+                                                   font.family = THESIS_FONT,
+                                                   font.size = THESIS_FONTSIZE)),
+        as_chunk(note_text, props = fp_text_default(italic = FALSE,
+                                                    font.family = THESIS_FONT,
+                                                    font.size = THESIS_FONTSIZE))
+      )
+    )
+}
+
+```
+
+# 3 Prep Data
+
+
+## 3.1 Import human data
+
+```{r}
+# 1. Setup Paths and Import ----------------------------------------------------
+data_path_human <- "../10_data/10_raw/humans_2026-04-13.csv"
+
+d_human_raw <- read.csv(data_path_human, sep = "|", na.strings = "NA")
+
+
+
+message("Data loaded: ", basename(data_path_human), " | Modified: ",
+        format(file.mtime(data_path_human), "%Y-%m-%d %H:%M"))
+
+
+
+# 2. Rename and Clean ----------------------------------------------------------
+# All columns named explicitly — any upstream rename breaks loudly here.
+
+
+
+
+colSums(is.na(d_human_raw))
+
+d_human <- d_human_raw |>
+  rename(
+    # Demographics
+    id             = participant_id,
+    gender         = gender,
+    age_year       = birthyear,
+    edu_level      = education,
+    
+    # SDT Self-Report Items
+    aut_1 = aut1, aut_2 = aut2, aut_3 = aut3, aut_4 = aut4,
+    com_1 = comp1, com_2 = comp2, com_3 = comp3, com_4 = comp4,
+    rel_1 = rel1, rel_2 = rel2, rel_3 = rel3, rel_4 = rel4, rel_5 = rel5,
+    
+    # LLM Ratings (Validation Targets)
+    llm_aut_1 = llm_aut_rep1, llm_aut_2 = llm_aut_rep2, llm_aut_3 = llm_aut_rep3,
+    llm_com_1 = llm_com_rep1, llm_com_2 = llm_com_rep2, llm_com_3 = llm_com_rep3,
+    llm_rel_1 = llm_rel_rep1, llm_rel_2 = llm_rel_rep2, llm_rel_3 = llm_rel_rep3,
+    
+    # word count
+    actual_words = wc_total
+  ) |>
+  # Drop PVQ items before type conversion to save memory/processing
+  select(-starts_with("PVQ")) |>
+  mutate(
+    across(c(id, gender, edu_level), as.factor),
+    age_year = as.integer(age_year),
+    across(starts_with("aut_"), as.numeric),
+    across(starts_with("com_"), as.numeric),
+    across(starts_with("rel_"), as.numeric),
+    across(starts_with("llm_"), as.numeric)
+  ) |>
+  # Compute means and reshape to match d_ai structure
+  mutate(
+    llm_aut_mean = rowMeans(across(c(llm_aut_1, llm_aut_2, llm_aut_3)), na.rm = TRUE),
+    llm_com_mean = rowMeans(across(c(llm_com_1, llm_com_2, llm_com_3)), na.rm = TRUE),
+    llm_rel_mean = rowMeans(across(c(llm_rel_1, llm_rel_2, llm_rel_3)), na.rm = TRUE),
+    q_aut_mean   = rowMeans(across(c(aut_1, aut_2, aut_3, aut_4)),       na.rm = TRUE),
+    q_com_mean   = rowMeans(across(c(com_1, com_2, com_3, com_4)),       na.rm = TRUE),
+    q_rel_mean   = rowMeans(across(c(rel_1, rel_2, rel_3, rel_4, rel_5)), na.rm = TRUE),
+    id_type      = "HU",
+    actual_words = as.integer(actual_words)
+  ) |>
+  select(id, id_type, llm_aut_mean, llm_com_mean, llm_rel_mean,
+         q_aut_mean, q_com_mean, q_rel_mean, actual_words)
+
+
+
+```
+
+
+## 3.2 Import AI data
+
+The dataset, containing both human and AI surrogate responses, was
+generated via a Python-based pipeline and exported to CSV. 
+
+```{r}
+
+#| label: import-validation
+#| message: false
+
+
+# 1. Setup Paths and Import ----------------------------------------------------
+data_path_ai <- "../10_data/80_analyses_exports/d_rq3_ai.rds"
+
+d_ai_raw <- readRDS(data_path_ai)
+
+
+# 2. Rename and Clean ----------------------------------------------------------
+d_ai <- d_ai_raw |>
+  rename(
+    id = id,
+    id_type = id_type, 
+    llm_aut_mean = llm_aut_mean,
+    llm_com_mean = llm_com_mean,
+    llm_rel_mean = llm_rel_mean,
+    q_aut_mean = q_aut_mean, 
+    q_com_mean = q_com_mean, 
+    q_rel_mean = q_rel_mean, 
+    actual_words = actual_words,
+    condition = condition,
+    text_count = text_count,
+    target_words = target_words
+  ) |>
+  mutate(
+    actual_words = as.integer(actual_words),
+    llm_aut_mean = as.numeric(llm_aut_mean),
+    llm_com_mean = as.numeric(llm_com_mean),
+    llm_rel_mean = as.numeric(llm_rel_mean),
+    q_aut_mean = as.numeric(q_aut_mean),
+    q_com_mean = as.numeric(q_com_mean),
+    q_rel_mean = as.numeric(q_rel_mean),
+    condition = as.factor(condition), 
+    target_words = as.integer(target_words),
+    text_count   = as.integer(text_count)
+    
+  ) |>
+  select(id, id_type, llm_aut_mean, llm_com_mean, llm_rel_mean,
+         q_aut_mean, q_com_mean, q_rel_mean, actual_words)
+
+
+# 3. Structural Integrity Check ------------------------------------------------
+
+# Ensure all variables required for subsequent analyses are present 
+required_vars <- c("id", "id_type",
+                   "llm_aut_mean", "llm_com_mean", "llm_rel_mean",
+                   "q_aut_mean",   "q_com_mean",   "q_rel_mean",
+                   "actual_words")
+missing_vars  <- setdiff(required_vars, names(d_ai))
+
+if (length(missing_vars) > 0) {
+  stop(paste("CRITICAL: Missing columns:", paste(missing_vars, collapse = ", ")))
+}
+
+```
+
+
+## 3.3 Import RQ2 exports
+
+Pre-computed objects exported from `10_Analyses_RQ2.qmd`. Re-render that file first if the source data changes.
+
+```{r}
+#| label: import-rq2-exports
+#| include: false
+
+exports_dir <- "../10_data/80_analyses_exports/"
+
+# d_ai_conditions: AI surrogate data for all 9 conditions (3 word lengths × 3 text counts).
+# Same structure as d_ai but not filtered. Columns: id, id_type, llm_*_mean, q_*_mean,
+# actual_words, condition, text_count, target_words. Use for condition-level comparisons with humans.
+d_ai_conditions <- readRDS(paste0(exports_dir, "d_rq3_ai_conditions.rds"))
+
+# tbl_icc_raw: LLM test-retest reliability (ICC 2,1) per condition × need dimension.
+# Computed in 10_Analyses_RQ2.qmd section 7.2 via psych::ICC across 3 scoring repeats.
+# Columns: Condition, Need (llm_aut/com/rel), ICC, CI_lo, CI_hi. Use for reliability benchmarking.
+tbl_icc_raw <- readRDS(paste0(exports_dir, "tbl_icc_raw.rds"))
+
+# tbl_word_count_by_condition: descriptive word count stats per condition.
+# Columns: condition, target_words, text_count, mean_words, sd_words, n.
+# Use for verifying instructional fidelity and reporting word counts in RQ3 context.
+tbl_word_count_by_condition <- readRDS(paste0(exports_dir, "tbl_word_count_by_condition.rds"))
+
+message("RQ2 exports loaded: d_ai_conditions (", nrow(d_ai_conditions), " rows), ",
+        "tbl_icc_raw (", nrow(tbl_icc_raw), " rows), ",
+        "tbl_word_count_by_condition (", nrow(tbl_word_count_by_condition), " rows)")
+```
+
+## 3.4 Quick integrity check
+
+The dataset, containing both human and AI surrogate responses, was
+generated via a Python-based pipeline and exported to CSV. The following
+block imports this data and lists already some basic data integrity checks
+
+```{r}
+
+#| label: audit-check-ai
+#| message: false
+
+# Audit Summary -------------------------------------------------------------
+tbl_import_audit_ai <- tibble::tribble(
+  ~Metric,                ~Value,
+  "Source File",          basename(data_path_ai),
+  "Dataframe",            as.character(deparse(substitute(d_ai))),
+  "Total Rows",           as.character(nrow(d_ai)),
+  "Distinct Personas",    as.character(dplyr::n_distinct(d_ai$id)),
+  "Columns",              as.character(ncol(d_ai))
+)
+
+tbl_import_audit_ai
+
+
+```
+
+
+```{r}
+#| label: audit-check-human
+#| message: false
+
+# Audit Summary -------------------------------------------------------------
+tbl_import_audit_human <- tibble::tribble(
+  ~Metric,                 ~Value,
+  "Source File",           data_path_human,
+  "Dataframe",             as.character(deparse(substitute(d_human))),
+  "Total Rows",            as.character(nrow(d_human)),
+  "Distinct Participants", as.character(dplyr::n_distinct(d_human$id)),
+  "Columns",               as.character(ncol(d_human))
+)
+
+tbl_import_audit_human
+
+```
+
+
+```{r}
+
+#| label: import-debug
+#| include: false
+#| message: false
+
+# looking at the "fresh" state of d before any column mutations
+
+message("--- START DEBUG LOG: Section 3.1 ---")
+message("Columns AI:     ", ncol(d_ai))
+message("Columns Humans:     ", ncol(d_human))
+
+# 1. Structural Inspection -----------------------------------------------------
+#glimpse(d)
+
+# 2. Integrity Check (Internal logic) -------------------------------------------
+# Check for any immediate NAs in key variables 
+colSums(is.na(d_ai))
+colSums(is.na(d_human))
+
+
+# 3. Clean-up verification umns ------------------------------------------------
+message("--- END DEBUG LOG: Section 3.1 ---")
+
+```
+
+## 3.5 Merge AI and Human data
+
+```{r}
+#| label: merge-ai-human
+#| include: false
+
+d <- dplyr::bind_rows(d_ai, d_human)
+
+stopifnot(
+  nrow(d) == nrow(d_ai) + nrow(d_human)
+)
+
+message(
+  "Merged: ", 
+  nrow(d_ai), " AI rows + ",
+  nrow(d_human), " human rows = ", 
+  nrow(d), " total"
+)
+
+```
+
+## 3.6 Matched Condition Verification
+
+The matched condition is the AI surrogate condition whose cumulative word length is closest to the average total word length of human texts. Text count is held constant at 3; the short-3 condition (target ~150 words per text × 3 texts = ~450 words total) is the matched condition. Both groups: `actual_words` = total word count across 3 texts.
+
+```{r}
+#| label: integrity-check-merge
+#| include: false
+
+
+stopifnot(
+  n_distinct(d$id_type) == 2,
+  "AI" %in% d$id_type,
+  "HU" %in% d$id_type,
+  !any(is.na(d$actual_words)),
+  !any(is.na(d$llm_aut_mean)), !any(is.na(d$llm_com_mean)), !any(is.na(d$llm_rel_mean)),
+  !any(is.na(d$q_aut_mean)),   !any(is.na(d$q_com_mean)),   !any(is.na(d$q_rel_mean))
+)
+message("Integrity check passed: both id_type groups present, no NAs in key variables.")
+```
+
+
+```{r}
+#| label: tbl-wordcount-match
+#| tbl-cap: "Total Word Count Summary by Sample"
+#| echo: false
+
+# Word count summary per group
+check_wordcount_match <- d |>
+  group_by(id_type) |>
+  summarise(
+    n   = n(),
+    M   = round(mean(actual_words), 2),
+    SD  = round(sd(actual_words), 2),
+    Mdn = round(median(actual_words, na.rm = TRUE), 2),
+    Min = min(actual_words),
+    Max = max(actual_words),
+    .groups = "drop"
+  )
+
+# Word count summary table
+tbl_wordcount_match <- check_wordcount_match |>
+  mutate(id_type = c(AI = LABEL_AI, HU = LABEL_HU)[as.character(id_type)]) |>
+  rename(!!LABEL_SAMPLE := id_type, N = n) |>
+  flextable() |>
+  style_apa7() |>
+  add_header_row(values = c("", "Actual word count summary"), colwidths = c(2, 5)) |>
+  add_apa_note(paste0(
+    "Actual words are the total word count across 3 scored texts ",
+     "for both samples. ",
+    "For AI surrogates, short-3 is the matched condition."
+  ))
+
+tbl_wordcount_match
+```
+
+
+# 4 Descriptives: Table
+
+Descriptive statistics per need dimension and score type (LLM-scored vs. questionnaire-based), reported separately for AI surrogates and human participants. All variables are on a 1–5 scale.
+
+```{r}
+#| label: desc-integrity-check
+#| include: false
+
+stopifnot(
+  all(!is.na(d$llm_aut_mean)), all(!is.na(d$q_aut_mean)),
+  all(!is.na(d$llm_com_mean)), all(!is.na(d$q_com_mean)),
+  all(!is.na(d$llm_rel_mean)), all(!is.na(d$q_rel_mean)),
+  nrow(d[d$id_type == "AI", ]) > 0,
+  nrow(d[d$id_type == "HU", ]) > 0
+)
+message("Descriptives integrity check passed.")
+```
+
+
+
+
+```{r}
+#| label: tbl-desc-summary
+#| tbl-cap: "Descriptive Statistics for LLM Scores and Questionnaire Scores by Need Dimension and Group (AI Surrogates vs. Human Participants)"
+#| echo: false
+
+# Layer B: descriptive summary — inline pivot, no persistent d_long
+tbl_desc_summary <- d |>
+  pivot_longer(
+    cols      = c(llm_aut_mean, llm_com_mean, llm_rel_mean,
+                  q_aut_mean,   q_com_mean,   q_rel_mean),
+    names_to  = "variable",
+    values_to = "score"
+  ) |>
+  mutate(
+    Need = case_when(
+      variable %in% c("llm_aut_mean", "q_aut_mean") ~ TABLE_LABEL_AUT,
+      variable %in% c("llm_com_mean", "q_com_mean") ~ TABLE_LABEL_COM,
+      variable %in% c("llm_rel_mean", "q_rel_mean") ~ TABLE_LABEL_REL
+    ),
+    `Score Type` = case_when(
+      variable %in% c("llm_aut_mean", "llm_com_mean", "llm_rel_mean") ~ "LLM Score",
+      variable %in% c("q_aut_mean",   "q_com_mean",   "q_rel_mean")   ~ "Questionnaire Score"
+    )
+  ) |>
+  group_by(id_type, Need, `Score Type`) |>
+  summarise(
+    M   = mean(score,   na.rm = TRUE),
+    SD  = sd(score,     na.rm = TRUE),
+    Mdn = round(median(score, na.rm = TRUE), 2),
+    Min = round(min(score,    na.rm = TRUE), 2),
+    Max = round(max(score,    na.rm = TRUE), 2),
+    n   = n(),
+    .groups = "drop"
+  ) |>
+  arrange(Need, `Score Type`, id_type) |>
+  mutate(
+    id_type = c(AI = LABEL_AI, HU = LABEL_HU)[as.character(id_type)],
+    m_sd    = sprintf("%.2f (%.2f)", M, SD)
+  ) |>
+  rename(!!LABEL_SAMPLE := id_type) |>
+  select(Need, `Score Type`, !!LABEL_SAMPLE, m_sd, Mdn, Min, Max) |>
+  flextable() |>
+  style_apa7() |>
+  merge_v(j = c("Need", "Score Type")) |>
+  mk_par(i = 1, j = "m_sd", part = "header", value = as_paragraph(
+    as_chunk("M",  props = fp_text_default(italic = TRUE,  font.family = THESIS_FONT, font.size = THESIS_FONTSIZE)),
+    as_chunk(" (", props = fp_text_default(italic = FALSE, font.family = THESIS_FONT, font.size = THESIS_FONTSIZE)),
+    as_chunk("SD", props = fp_text_default(italic = TRUE,  font.family = THESIS_FONT, font.size = THESIS_FONTSIZE)),
+    as_chunk(")",  props = fp_text_default(italic = FALSE, font.family = THESIS_FONT, font.size = THESIS_FONTSIZE))
+  )) |>
+  add_apa_note(paste0(
+    "All scores on a 1–5 scale. LLM Score = mean of 3 scoring repeats. ",
+    "Questionnaire Score = mean of 4 items. ",
+    LABEL_AI, " N = ", nrow(d[d$id_type == "AI", ]), "; ",
+    LABEL_HU, " N = ", nrow(d[d$id_type == "HU", ]), "."
+  ))
+
+tbl_desc_summary
+```
+
+
+```{r}
+#| label: tbl-desc-summary-wide
+#| tbl-cap: "Descriptive Statistics for LLM Scores and Questionnaire Scores by Need Dimension and Group (M (SD))"
+#| echo: false
+
+# Wide format: one M (SD) column per group + Δ M (Δ SD) — for comparison with original tbl-desc-summary
+tbl_desc_summary_wide <- d |>
+  pivot_longer(
+    cols      = c(llm_aut_mean, llm_com_mean, llm_rel_mean,
+                  q_aut_mean,   q_com_mean,   q_rel_mean),
+    names_to  = "variable",
+    values_to = "score"
+  ) |>
+  mutate(
+    Need = case_when(
+      variable %in% c("llm_aut_mean", "q_aut_mean") ~ TABLE_LABEL_AUT,
+      variable %in% c("llm_com_mean", "q_com_mean") ~ TABLE_LABEL_COM,
+      variable %in% c("llm_rel_mean", "q_rel_mean") ~ TABLE_LABEL_REL
+    ),
+    Instrument = case_when(
+      variable %in% c("llm_aut_mean", "llm_com_mean", "llm_rel_mean") ~ "LLM Score",
+      variable %in% c("q_aut_mean",   "q_com_mean",   "q_rel_mean")   ~ "Questionnaire Score"
+    )
+  ) |>
+  group_by(id_type, Need, Instrument) |>
+  summarise(
+    m  = mean(score, na.rm = TRUE),
+    sd = sd(score,   na.rm = TRUE),
+    .groups = "drop"
+  ) |>
+  pivot_wider(names_from = id_type, values_from = c(m, sd)) |>
+  arrange(Need, Instrument) |>
+  transmute(
+    Need,
+    Instrument,
+    hu_col    = sprintf("%.2f (%.2f)", m_HU, sd_HU),
+    ai_col    = sprintf("%.2f (%.2f)", m_AI, sd_AI),
+    delta_col = sprintf("%.2f (%.2f)", m_AI - m_HU, sd_AI - sd_HU)
+  ) |>
+  flextable() |>
+  style_apa7() |>
+  merge_v(j = "Need") |>
+  set_header_labels(Need = LABEL_NEEDS, hu_col = "M (SD)", ai_col = "M (SD)", delta_col = "Δ M (Δ SD)") |>
+  add_header_row(
+    values    = c("", "", LABEL_HU, LABEL_AI, "Difference"),
+    colwidths = c(1L, 1L, 1L, 1L, 1L)
+  ) |>
+  mk_par(i = 2, j = 3, part = "header", value = as_paragraph(
+    as_chunk("M",   props = fp_text_default(italic = TRUE,  font.family = THESIS_FONT, font.size = THESIS_FONTSIZE)),
+    as_chunk(" (",  props = fp_text_default(italic = FALSE, font.family = THESIS_FONT, font.size = THESIS_FONTSIZE)),
+    as_chunk("SD",  props = fp_text_default(italic = TRUE,  font.family = THESIS_FONT, font.size = THESIS_FONTSIZE)),
+    as_chunk(")",   props = fp_text_default(italic = FALSE, font.family = THESIS_FONT, font.size = THESIS_FONTSIZE))
+  )) |>
+  mk_par(i = 2, j = 4, part = "header", value = as_paragraph(
+    as_chunk("M",   props = fp_text_default(italic = TRUE,  font.family = THESIS_FONT, font.size = THESIS_FONTSIZE)),
+    as_chunk(" (",  props = fp_text_default(italic = FALSE, font.family = THESIS_FONT, font.size = THESIS_FONTSIZE)),
+    as_chunk("SD",  props = fp_text_default(italic = TRUE,  font.family = THESIS_FONT, font.size = THESIS_FONTSIZE)),
+    as_chunk(")",   props = fp_text_default(italic = FALSE, font.family = THESIS_FONT, font.size = THESIS_FONTSIZE))
+  )) |>
+  mk_par(i = 2, j = 5, part = "header", value = as_paragraph(
+    as_chunk("Δ ",  props = fp_text_default(italic = FALSE, font.family = THESIS_FONT, font.size = THESIS_FONTSIZE)),
+    as_chunk("M",   props = fp_text_default(italic = TRUE,  font.family = THESIS_FONT, font.size = THESIS_FONTSIZE)),
+    as_chunk(" (Δ ", props = fp_text_default(italic = FALSE, font.family = THESIS_FONT, font.size = THESIS_FONTSIZE)),
+    as_chunk("SD",  props = fp_text_default(italic = TRUE,  font.family = THESIS_FONT, font.size = THESIS_FONTSIZE)),
+    as_chunk(")",   props = fp_text_default(italic = FALSE, font.family = THESIS_FONT, font.size = THESIS_FONTSIZE))
+  )) |>
+  add_apa_note(paste0(
+    "Values are M (SD). All scores on a 1–5 scale. ",
+    "LLM = mean of 3 scoring repeats; Questionnaire = mean of 4–5 items. ",
+    "Δ = AI surrogates − Humans. ",
+    LABEL_AI, " N = ", nrow(d[d$id_type == "AI", ]), "; ",
+    LABEL_HU, " N = ", nrow(d[d$id_type == "HU", ]), "."
+  ))
+
+tbl_desc_summary_wide
+```
+
+```{r}
+#| label: tbl-desc-iqr-range
+#| tbl-cap: "Descriptive Statistics for LLM Scores and Questionnaire Scores by Need Dimension and Group (IQR and Range)"
+#| echo: false
+
+tbl_desc_iqr_range <- d |>
+  pivot_longer(
+    cols      = c(llm_aut_mean, llm_com_mean, llm_rel_mean,
+                  q_aut_mean,   q_com_mean,   q_rel_mean),
+    names_to  = "variable",
+    values_to = "score"
+  ) |>
+  mutate(
+    Need = case_when(
+      variable %in% c("llm_aut_mean", "q_aut_mean") ~ TABLE_LABEL_AUT,
+      variable %in% c("llm_com_mean", "q_com_mean") ~ TABLE_LABEL_COM,
+      variable %in% c("llm_rel_mean", "q_rel_mean") ~ TABLE_LABEL_REL
+    ),
+    Instrument = case_when(
+      variable %in% c("llm_aut_mean", "llm_com_mean", "llm_rel_mean") ~ "LLM Score",
+      variable %in% c("q_aut_mean",   "q_com_mean",   "q_rel_mean")   ~ "Questionnaire Score"
+    )
+  ) |>
+  group_by(id_type, Need, Instrument) |>
+  summarise(
+    iqr   = IQR(score,           na.rm = TRUE),
+    range = max(score, na.rm = TRUE) - min(score, na.rm = TRUE),
+    .groups = "drop"
+  ) |>
+  pivot_wider(names_from = id_type, values_from = c(iqr, range)) |>
+  arrange(Need, Instrument) |>
+  transmute(
+    Need,
+    Instrument,
+    hu_iqr   = sprintf("%.2f", iqr_HU),
+    ai_iqr   = sprintf("%.2f", iqr_AI),
+    hu_range = sprintf("%.2f", range_HU),
+    ai_range = sprintf("%.2f", range_AI)
+  ) |>
+  flextable() |>
+  style_apa7() |>
+  merge_v(j = "Need") |>
+  set_header_labels(
+    Need       = LABEL_NEEDS,
+    Instrument = "Score Type",
+    hu_iqr     = LABEL_HU,
+    ai_iqr     = LABEL_AI,
+    hu_range   = LABEL_HU,
+    ai_range   = LABEL_AI
+  ) |>
+  add_header_row(
+    values    = c("", "", "IQR", "Range"),
+    colwidths = c(1L, 1L, 2L, 2L)
+  ) |>
+  align(i = 1, align = "center", part = "header") |>
+  add_apa_note(paste0(
+    "IQR = interquartile range (Q3 − Q1). Range = maximum − minimum. ",
+    "All scores on a 1–5 scale. ",
+    LABEL_AI, " N = ", nrow(d[d$id_type == "AI", ]), "; ",
+    LABEL_HU, " N = ", nrow(d[d$id_type == "HU", ]), "."
+  ))
+
+tbl_desc_iqr_range
+```
+
+### Kurtosis, Skewness
+
+Interpretation Kurtosis
+- Excess kurtosis near 0: roughly normal tail behavior
+- Positive excess kurtosis: more outlier-prone, heavier tails
+- Negative excess kurtosis: flatter / lighter-tailed / more bounded
+
+Interpretation Skewness
+- Around 0: little asymmetry
+- Larger positive values: increasing right-tail pull; the mean is often above the median
+- Larger negative values: increasing left-tail pull; the mean is often below the median
+
+```{r}
+#| label: tbl-desc-distrib
+#| tbl-cap: "Distribution Statistics for LLM Scores and Questionnaire Scores by Need Dimension and Group (Quantiles, IQR, Skewness, Kurtosis)"
+#| echo: false
+
+tbl_desc_distrib <- d |>
+  pivot_longer(
+    cols      = c(llm_aut_mean, llm_com_mean, llm_rel_mean,
+                  q_aut_mean,   q_com_mean,   q_rel_mean),
+    names_to  = "variable",
+    values_to = "score"
+  ) |>
+  mutate(
+    Need = case_when(
+      variable %in% c("llm_aut_mean", "q_aut_mean") ~ TABLE_LABEL_AUT,
+      variable %in% c("llm_com_mean", "q_com_mean") ~ TABLE_LABEL_COM,
+      variable %in% c("llm_rel_mean", "q_rel_mean") ~ TABLE_LABEL_REL
+    ),
+    Instrument = case_when(
+      variable %in% c("llm_aut_mean", "llm_com_mean", "llm_rel_mean") ~ "LLM Score",
+      variable %in% c("q_aut_mean",   "q_com_mean",   "q_rel_mean")   ~ "Questionnaire Score"
+    )
+  ) |>
+  group_by(id_type, Need, Instrument) |>
+  summarise(
+    q1   = round(quantile(score, 0.25, na.rm = TRUE), 2),
+    q3   = round(quantile(score, 0.75, na.rm = TRUE), 2),
+    iqr  = round(IQR(score, na.rm = TRUE), 2),
+    skew = round(psych::skew(score), 2),
+    kurt = round(psych::kurtosi(score), 2),
+    .groups = "drop"
+  ) |>
+  pivot_wider(names_from = id_type, values_from = c(q1, q3, iqr, skew, kurt)) |>
+  arrange(Need, Instrument) |>
+  select(Need, Instrument,
+         q1_HU, q3_HU, iqr_HU, skew_HU, kurt_HU,
+         q1_AI, q3_AI, iqr_AI, skew_AI, kurt_AI) |>
+  flextable() |>
+  style_apa7() |>
+  merge_v(j = "Need") |>
+  set_header_labels(
+    Need        = LABEL_NEEDS,
+    Instrument  = "Instrument",
+    q1_HU       = "Q1",
+    q3_HU       = "Q3",
+    iqr_HU      = "IQR",
+    skew_HU     = "Skewness",
+    kurt_HU     = "Kurtosis",
+    q1_AI       = "Q1",
+    q3_AI       = "Q3",
+    iqr_AI      = "IQR",
+    skew_AI     = "Skewness",
+    kurt_AI     = "Kurtosis"
+  ) |>
+  add_header_row(
+    values    = c("", "", LABEL_HU, LABEL_AI),
+    colwidths = c(1L, 1L, 5L, 5L)
+  ) |>
+  add_apa_note(paste0(
+    "All scores on a 1–5 scale. ",
+    "Q1 = 25th percentile; Q3 = 75th percentile; IQR = interquartile range (Q3 − Q1); ",
+    "Skewness = Fisher's moment coefficient (g1); Kurtosis = excess kurtosis (g2). ",
+    LABEL_AI, " N = ", nrow(d[d$id_type == "AI", ]), "; ",
+    LABEL_HU, " N = ", nrow(d[d$id_type == "HU", ]), "."
+  ))
+
+tbl_desc_distrib
+```
+
+### Correlations
+
+```{r}
+#| label: tbl-desc-corr
+#| tbl-cap: "Pearson Correlations Between LLM and Questionnaire Scores by Need Dimension and Group"
+#| echo: false
+
+
+# The !! operator on TABLE_LABEL_AUT/COM/REL and LABEL_SAMPLE means 
+# all column headers come from globals.
+
+corr_ai <- d |> dplyr::filter(id_type == "AI") |>
+  dplyr::summarise(
+    !!TABLE_LABEL_AUT := round(cor(llm_aut_mean, q_aut_mean), 2),
+    !!TABLE_LABEL_COM := round(cor(llm_com_mean, q_com_mean), 2),
+    !!TABLE_LABEL_REL := round(cor(llm_rel_mean, q_rel_mean), 2)
+  )
+corr_hu <- d |> dplyr::filter(id_type == "HU") |>
+  dplyr::summarise(
+    !!TABLE_LABEL_AUT := round(cor(llm_aut_mean, q_aut_mean), 2),
+    !!TABLE_LABEL_COM := round(cor(llm_com_mean, q_com_mean), 2),
+    !!TABLE_LABEL_REL := round(cor(llm_rel_mean, q_rel_mean), 2)
+  )
+
+tbl_desc_corr <- tibble::tibble(
+  Need            = c(TABLE_LABEL_AUT,            TABLE_LABEL_COM,            TABLE_LABEL_REL),
+  !!LABEL_HU     := c(corr_hu[[TABLE_LABEL_AUT]], corr_hu[[TABLE_LABEL_COM]], corr_hu[[TABLE_LABEL_REL]]),
+  !!LABEL_AI     := c(corr_ai[[TABLE_LABEL_AUT]], corr_ai[[TABLE_LABEL_COM]], corr_ai[[TABLE_LABEL_REL]])
+) |>
+  dplyr::mutate(`Δr` = round(.data[[LABEL_AI]] - .data[[LABEL_HU]], 2)) |>
+  flextable() |>
+  style_apa7() |>
+  add_apa_note(paste0(
+    "Pearson r between LLM score (mean of 3 repeats) and questionnaire score (mean of 4 items) ",
+    "per need dimension. ",
+    "Δr = r(AI surrogates) − r(Human). ",
+    LABEL_AI, " N = ", nrow(d[d$id_type == "AI", ]), "; ",
+    LABEL_HU, " N = ", nrow(d[d$id_type == "HU", ]), "."
+  ))
+
+tbl_desc_corr
+```
+# 5 Descriptives: Plots
+
+
+
+### Scatter plot 
+
+```{r}
+#| label: debug-scatter-pairs
+#| include: false
+
+# z-transform
+
+# Extract by group
+l_aut_ai <- d$llm_aut_mean[d$id_type == "AI"]
+l_com_ai <- d$llm_com_mean[d$id_type == "AI"]
+l_rel_ai <- d$llm_rel_mean[d$id_type == "AI"]
+l_aut_hu <- d$llm_aut_mean[d$id_type == "HU"]
+l_com_hu <- d$llm_com_mean[d$id_type == "HU"]
+l_rel_hu <- d$llm_rel_mean[d$id_type == "HU"]
+
+q_aut_ai <- d$q_aut_mean[d$id_type == "AI"]
+q_com_ai <- d$q_com_mean[d$id_type == "AI"]
+q_rel_ai <- d$q_rel_mean[d$id_type == "AI"]
+q_aut_hu <- d$q_aut_mean[d$id_type == "HU"]
+q_com_hu <- d$q_com_mean[d$id_type == "HU"]
+q_rel_hu <- d$q_rel_mean[d$id_type == "HU"]
+
+# Z-score each vector
+z_l_aut_ai <- (l_aut_ai - mean(l_aut_ai)) / sd(l_aut_ai)
+z_l_com_ai <- (l_com_ai - mean(l_com_ai)) / sd(l_com_ai)
+z_l_rel_ai <- (l_rel_ai - mean(l_rel_ai)) / sd(l_rel_ai)
+z_l_aut_hu <- (l_aut_hu - mean(l_aut_hu)) / sd(l_aut_hu)
+z_l_com_hu <- (l_com_hu - mean(l_com_hu)) / sd(l_com_hu)
+z_l_rel_hu <- (l_rel_hu - mean(l_rel_hu)) / sd(l_rel_hu)
+
+z_q_aut_ai <- (q_aut_ai - mean(q_aut_ai)) / sd(q_aut_ai)
+z_q_com_ai <- (q_com_ai - mean(q_com_ai)) / sd(q_com_ai)
+z_q_rel_ai <- (q_rel_ai - mean(q_rel_ai)) / sd(q_rel_ai)
+z_q_aut_hu <- (q_aut_hu - mean(q_aut_hu)) / sd(q_aut_hu)
+z_q_com_hu <- (q_com_hu - mean(q_com_hu)) / sd(q_com_hu)
+z_q_rel_hu <- (q_rel_hu - mean(q_rel_hu)) / sd(q_rel_hu)
+
+
+
+# Scatter plot matrix, just to show that they linearly related
+
+# pairs(~ fahr + celc + z)
+
+pairs(~ l_aut_ai + q_aut_ai +  z_l_aut_ai + z_q_aut_ai)
+
+#pairs(~ z_l_aut_ai + z_q_aut_ai)
+
+rm(l_aut_ai, l_com_ai, l_rel_ai, l_aut_hu, l_com_hu, l_rel_hu,
+   q_aut_ai, q_com_ai, q_rel_ai, q_aut_hu, q_com_hu, q_rel_hu,
+   z_l_aut_ai, z_l_com_ai, z_l_rel_ai, z_l_aut_hu, z_l_com_hu, z_l_rel_hu,
+   z_q_aut_ai, z_q_com_ai, z_q_rel_ai, z_q_aut_hu, z_q_com_hu, z_q_rel_hu)
+
+```
+
+## Scatter plot - ggplot
+
+```{r}
+#| label: fig-desc-corr-scatter
+#| fig-cap: "Scatter plots of LLM mean scores (x-axis) against questionnaire composite scores (y-axis), faceted by need dimension (columns) and sample group (rows). Top row: AI surrogates; bottom row: human participants Each point represents one participant. Lines show OLS regression fits with 95% CIs. Pearson r values are shown per panel and correspond to those in the table above."
+#| echo: false
+#| fig-width: 10
+#| fig-height: 6
+#| fig-dpi: 300
+
+corr_labels_scatter <- d |>
+  group_by(id_type) |>
+  summarise(
+    aut = round(cor(llm_aut_mean, q_aut_mean, use = "complete.obs"), 2),
+    com = round(cor(llm_com_mean, q_com_mean, use = "complete.obs"), 2),
+    rel = round(cor(llm_rel_mean, q_rel_mean, use = "complete.obs"), 2),
+    .groups = "drop"
+  ) |>
+  pivot_longer(cols = c(aut, com, rel), names_to = "need", values_to = "r") |>
+  mutate(
+    Need  = case_when(
+      need == "aut" ~ TABLE_LABEL_AUT,
+      need == "com" ~ TABLE_LABEL_COM,
+      need == "rel" ~ TABLE_LABEL_REL
+    ),
+    Group = c(AI = LABEL_AI, HU = LABEL_HU)[as.character(id_type)],
+    label = paste0("r = ", sprintf("%.2f", r))
+  )
+
+d |>
+  pivot_longer(
+    cols          = c(llm_aut_mean, llm_com_mean, llm_rel_mean,
+                      q_aut_mean,   q_com_mean,   q_rel_mean),
+    names_to      = c("source", "need"),
+    names_pattern = "(llm|q)_(aut|com|rel)_mean"
+  ) |>
+  pivot_wider(names_from = source, values_from = value) |>
+  mutate(
+    Need  = case_when(
+      need == "aut" ~ TABLE_LABEL_AUT,
+      need == "com" ~ TABLE_LABEL_COM,
+      need == "rel" ~ TABLE_LABEL_REL
+    ),
+    Group = c(AI = LABEL_AI, HU = LABEL_HU)[as.character(id_type)]
+  ) |>
+  ggplot(aes(x = llm, y = q, color = Group)) +
+  geom_point(alpha = 0.3, size = 1) +
+  geom_smooth(method = "lm", se = TRUE, linewidth = 0.8) +
+  geom_text(
+    data       = corr_labels_scatter,
+    aes(x = -Inf, y = Inf, label = label, color = Group),
+    hjust = -0.15, vjust = 1.5,
+    size = 3.5, inherit.aes = FALSE, fontface = "bold"
+  ) +
+  facet_grid(Group ~ Need) +
+  scale_color_manual(values = setNames(c(COL_AI_LINE, COL_HU_LINE), c(LABEL_AI, LABEL_HU))) +
+  labs(x = "LLM Score", y = "Questionnaire Score", color = LABEL_SAMPLE) +
+  theme_classic(base_family = THESIS_FONT, base_size = THESIS_FONTSIZE) +
+  theme(
+    strip.background = element_blank(),
+    strip.text       = element_text(face = "bold"),
+    legend.position  = "none"
+  )
+
+
+```
+
+## Scatter plot - with jitter
+
+```{r}
+#| label: fig-desc-corr-scatter-jitter
+#| fig-cap: "Scatter plots of LLM mean scores (x-axis) against questionnaire composite scores (y-axis), faceted by need dimension (columns) and sample group (rows). Top row: AI surrogates; bottom row: human participants. Points are jittered to reveal density. Lines show OLS regression fits with 95% CIs. Pearson r values are shown per panel."
+#| echo: false
+#| fig-width: 10
+#| fig-height: 7
+#| fig-dpi: 600
+
+# 1. Calculate labels with specific positioning coordinates
+corr_labels_scatter_jitter <- d |>
+  group_by(id_type) |>
+  summarise(
+    aut = round(cor(llm_aut_mean, q_aut_mean, use = "complete.obs"), 2),
+    com = round(cor(llm_com_mean, q_com_mean, use = "complete.obs"), 2),
+    rel = round(cor(llm_rel_mean, q_rel_mean, use = "complete.obs"), 2),
+    .groups = "drop"
+  ) |>
+  pivot_longer(cols = c(aut, com, rel), names_to = "need", values_to = "r") |>
+  mutate(
+    Need  = case_when(
+      need == "aut" ~ TABLE_LABEL_AUT,
+      need == "com" ~ TABLE_LABEL_COM,
+      need == "rel" ~ TABLE_LABEL_REL
+    ),
+    Group = c(AI = LABEL_AI, HU = LABEL_HU)[as.character(id_type)],
+    label = paste0("r = ", sprintf("%.2f", r)),
+    # Use explicit coordinates instead of -Inf to ensure consistent padding
+    x_pos = 1.2, 
+    y_pos = 4.8  
+  )
+
+# 2. Main Plot Pipeline
+d |>
+  pivot_longer(
+    cols          = c(llm_aut_mean, llm_com_mean, llm_rel_mean,
+                      q_aut_mean,   q_com_mean,   q_rel_mean),
+    names_to      = c("source", "need"),
+    names_pattern = "(llm|q)_(aut|com|rel)_mean"
+  ) |>
+  pivot_wider(names_from = source, values_from = value) |>
+  mutate(
+    Need  = factor(case_when(
+      need == "aut" ~ TABLE_LABEL_AUT,
+      need == "com" ~ TABLE_LABEL_COM,
+      need == "rel" ~ TABLE_LABEL_REL
+    ), levels = c(TABLE_LABEL_AUT, TABLE_LABEL_COM, TABLE_LABEL_REL)),
+    Group = c(AI = LABEL_AI, HU = LABEL_HU)[as.character(id_type)]
+  ) |>
+  ggplot(aes(x = llm, y = q, color = Group, fill = Group)) +
+  # Use jitter to resolve the integer-score overlap
+  geom_jitter(alpha = 0.25, size = 1.2, width = 0.15, height = 0.15, stroke = 0) +
+  geom_smooth(method = "lm", se = TRUE, linewidth = 0.8, alpha = 0.2) +
+  geom_text(
+    data    = corr_labels_scatter_jitter,
+    aes(x = x_pos, y = y_pos, label = label, color = Group),
+    hjust   = 0, 
+    size    = 3.5, 
+    inherit.aes = FALSE, 
+    fontface = "bold"
+  ) +
+  facet_grid(Group ~ Need) +
+  # Standardize axes to the 1-5 scale
+  scale_x_continuous(limits = c(0.8, 5.2), breaks = 1:5) +
+  scale_y_continuous(limits = c(0.8, 5.2), breaks = 1:5) +
+  scale_color_manual(values = c(
+    "AI surrogates" = COL_AI_SHADES[1],
+    "Humans"        = COL_HU_SHADES[1]
+  )) +
+  scale_fill_manual(values = c(
+    "AI surrogates" = COL_AI_SHADES[1],
+    "Humans"        = COL_HU_SHADES[1]
+  )) +
+  labs(
+    x = "LLM Predicted Score",
+    y = "Human Questionnaire Score",
+    color = LABEL_SAMPLE
+  ) +
+  theme_classic(base_family = THESIS_FONT, base_size = THESIS_FONTSIZE) +
+  theme(
+    strip.background = element_rect(fill = "grey97", color = NA),
+    strip.text       = element_text(face = "bold"),
+    panel.spacing    = unit(1.2, "lines"),
+    legend.position  = "none"
+  )
+
+
+```
+
+
+### five plot types
+
+Five plot types in separate chunks for easy deletion/selection. Histograms (5.1) represent the bounded 1–5 integer scale — recommended for the thesis. Density plots (5.2) smooth the histogram but may show phantom tails outside 1–5. Violin + jitter (5.3) combines distribution shape with individual points. Boxplots (5.4) give a compact group comparison. Ridgeline plots (5.5) are well-suited for overlapping group comparisons. Note: with simulated human data, distributions appear artificially smooth.
+
+```{r}
+#| label: plot-setup
+#| include: false
+
+# Create d_scores_long once for all section 5 plot chunks; rm() in plot-cleanup
+d_scores_long <- d |>
+  pivot_longer(
+    cols      = c(llm_aut_mean, llm_com_mean, llm_rel_mean,
+                  q_aut_mean,   q_com_mean,   q_rel_mean),
+    names_to  = "variable",
+    values_to = "score"
+  ) |>
+  mutate(
+    Need = case_when(
+      variable %in% c("llm_aut_mean", "q_aut_mean") ~ TABLE_LABEL_AUT,
+      variable %in% c("llm_com_mean", "q_com_mean") ~ TABLE_LABEL_COM,
+      variable %in% c("llm_rel_mean", "q_rel_mean") ~ TABLE_LABEL_REL
+    ),
+    `Score Type` = case_when(
+      variable %in% c("llm_aut_mean", "llm_com_mean", "llm_rel_mean") ~ "LLM Score",
+      variable %in% c("q_aut_mean",   "q_com_mean",   "q_rel_mean")   ~ "Questionnaire Score"
+    ),
+    Group = factor(c(AI = LABEL_AI, HU = LABEL_HU)[as.character(id_type)], levels = c(LABEL_AI, LABEL_HU)),
+    Need  = factor(Need, levels = c(TABLE_LABEL_AUT, TABLE_LABEL_COM, TABLE_LABEL_REL)),
+    `Score Type` = factor(`Score Type`, levels = c("LLM Score", "Questionnaire Score"))
+  )
+```
+
+## 5.1 Histograms
+
+```{r}
+#| label: fig-hist
+#| fig-cap: "Score distributions by need dimension and group (AI surrogates vs. human participants). Vertical lines indicate group means. Rows: LLM scores (top) and questionnaire scores (bottom)."
+#| echo: false
+#| fig-width: 10
+#| fig-height: 7
+
+GROUP_COLORS <- setNames(
+  c(COL_AI_LINE, COL_HU_LINE),
+  c(LABEL_AI, LABEL_HU)
+)
+
+means_df <- d_scores_long |>
+  group_by(Group, Need, `Score Type`) |>
+  summarise(M = mean(score, na.rm = TRUE), .groups = "drop")
+
+fig_hist <- d_scores_long |>
+  ggplot(aes(x = score, fill = Group)) +
+  geom_histogram(binwidth = 1/3, boundary = 1, position = "dodge", alpha = 0.85, color = "white") +
+  geom_vline(data = means_df,
+             aes(xintercept = M, color = Group, linetype = Group),
+             linewidth = 0.8) +
+  facet_grid(`Score Type` ~ Need) +
+  scale_fill_manual(values = GROUP_COLORS) +
+  scale_color_manual(values = GROUP_COLORS) +
+  scale_x_continuous(breaks = 1:5, limits = c(2/3, 5 + 1/3)) +
+  labs(title = "Distribution of Scores by Need and Group",
+       x = "Score (1–5)", y = "Count",
+       fill = LABEL_SAMPLE, color = "Group (mean)", linetype = "Group (mean)") +
+  theme_classic(base_family = THESIS_FONT, base_size = THESIS_FONTSIZE) +
+  theme(strip.background = element_blank(), strip.text = element_text(face = "bold"))
+
+fig_hist
+```
+
+
+
+## 5.2 Density + Rug
+
+Density curves smooth the histogram; they may show phantom tails outside 1–5. Rug marks (bottom) show individual observations — most useful for N < 200; at N ≥ 400 (AI group) tick marks overlap and histograms (5.1) are more informative.
+
+```{r}
+#| label: fig-density
+#| fig-cap: "Kernel density estimates of score distributions by need dimension and group. Rug marks indicate individual observations. Rows: LLM scores (top) and questionnaire scores (bottom)."
+#| echo: false
+#| fig-width: 10
+#| fig-height: 7
+
+fig_density <- d_scores_long |>
+  ggplot(aes(x = score, fill = Group, color = Group)) +
+  geom_density(alpha = 0.4) +
+  geom_rug(alpha = 0.3, sides = "b") +
+  facet_grid(`Score Type` ~ Need) +
+  scale_fill_manual(values  = setNames(c(COL_AI_LINE, COL_HU_LINE), c(LABEL_AI, LABEL_HU))) +
+  scale_color_manual(values = setNames(c(COL_AI_LINE, COL_HU_LINE), c(LABEL_AI, LABEL_HU))) +
+  scale_x_continuous(breaks = 1:5) +
+  labs(title = "Density + Rug: Scores by Need and Group",
+       x = "Score (1–5)", y = "Density", fill = LABEL_SAMPLE, color = LABEL_SAMPLE) +
+  theme_classic(base_family = THESIS_FONT, base_size = THESIS_FONTSIZE) +
+  theme(strip.background = element_blank(), strip.text = element_text(face = "bold"))
+
+fig_density
+```
+
+## 5.3 Violin + Jitter
+
+Violin shows density shape; nested boxplot gives IQR; jitter shows individual observations.
+
+```{r}
+#| label: fig-violin
+#| fig-cap: "Violin plots with nested boxplots and jittered observations for scores by need dimension and group. Width reflects density; boxes show IQR; center line shows median."
+#| echo: false
+#| fig-width: 10
+#| fig-height: 7
+
+fig_violin <- d_scores_long |>
+  ggplot(aes(x = Group, y = score, fill = Group)) +
+  geom_violin(alpha = 0.5, trim = FALSE) +
+  geom_boxplot(width = 0.1, outlier.shape = NA, fill = "white", alpha = 0.8) +
+  geom_jitter(alpha = 0.2, size = 0.5, width = 0.15) +
+  facet_grid(`Score Type` ~ Need) +
+  scale_fill_manual(values = setNames(c(COL_AI_LINE, COL_HU_LINE), c(LABEL_AI, LABEL_HU))) +
+  scale_y_continuous(breaks = 1:5, limits = c(0.75, 5.25)) +
+  labs(title = "Violin + Jitter: Scores by Need and Group",
+       x = LABEL_SAMPLE, y = "Score (1–5)", fill = LABEL_SAMPLE) +
+  theme_classic(base_family = THESIS_FONT, base_size = THESIS_FONTSIZE) +
+  theme(strip.background = element_blank(), strip.text = element_text(face = "bold"),
+        legend.position = "none")
+
+fig_violin
+```
+
+## 5.4 Boxplot + Jitter
+
+On a 1–5 scale, outlier detection via IQR ± 1.5 is not applied — values at floor/ceiling are substantively meaningful, not measurement artifacts.
+
+```{r}
+#| label: fig-box
+#| fig-cap: "Boxplots with jittered individual observations for scores by need dimension and group. Whiskers extend to 1.5× IQR; floor/ceiling values are retained as substantively meaningful on a bounded scale."
+#| echo: false
+#| fig-width: 10
+#| fig-height: 7
+
+fig_box <- d_scores_long |>
+  ggplot(aes(x = Group, y = score, fill = Group)) +
+  geom_boxplot(outlier.shape = NA, alpha = 0.6) +
+  geom_jitter(width = 0.1, alpha = 0.3, size = 0.8) +
+  facet_grid(`Score Type` ~ Need) +
+  scale_fill_manual(values = setNames(c(COL_AI_LINE, COL_HU_LINE), c(LABEL_AI, LABEL_HU))) +
+  scale_y_continuous(breaks = 1:5, limits = c(0.75, 5.25)) +
+  labs(title = "Boxplot + Jitter: Scores by Need and Group",
+       x = LABEL_SAMPLE, y = "Score (1–5)", fill = LABEL_SAMPLE) +
+  theme_classic(base_family = THESIS_FONT, base_size = THESIS_FONTSIZE) +
+  theme(strip.background = element_blank(), strip.text = element_text(face = "bold"),
+        legend.position = "none")
+
+fig_box
+```
+
+## 5.5 Ridgeline
+
+```{r}
+#| label: fig-ridge
+#| fig-cap: "Ridgeline density plots of scores by need dimension and group, facilitating direct overlap comparison between AI surrogates and human participants."
+#| echo: false
+#| fig-width: 10
+#| fig-height: 7
+
+fig_ridge <- d_scores_long |>
+  ggplot(aes(x = score, y = Group, fill = Group)) +
+  geom_density_ridges(alpha = 0.6, scale = 0.9) +
+  facet_grid(`Score Type` ~ Need) +
+  scale_fill_manual(values = setNames(c(COL_AI_LINE, COL_HU_LINE), c(LABEL_AI, LABEL_HU))) +
+  scale_x_continuous(breaks = 1:5) +
+  labs(title = "Ridgeline: Scores by Need and Group",
+       x = "Score (1–5)", y = LABEL_SAMPLE, fill = LABEL_SAMPLE) +
+  theme_classic(base_family = THESIS_FONT, base_size = THESIS_FONTSIZE) +
+  theme(strip.background = element_blank(), strip.text = element_text(face = "bold"),
+        legend.position = "none")
+
+fig_ridge
+```
+
+```{r}
+#| label: plot-cleanup
+#| include: false
+
+rm(d_scores_long)
+```
+
+
+# 6 Test assumptions
+
+Pearson correlations
+1. Continuous (interval/ratio) variables
+2. Linear relationship
+3. Bivariate normality 
+4. Homoscedasticity 
+5. Paired, independent observations
+6. No influential outliers
+
+
+```{r}
+#| label: rq3a-setup
+#| include: false
+
+# Re-derive groups from d so any upstream filtering propagates automatically
+d_grp_ai    <- d |> dplyr::filter(id_type == "AI")
+d_grp_human <- d |> dplyr::filter(id_type == "HU")
+
+# Helper: format p-values to APA style (used in sections 6 and 7)
+fmt_p <- function(p) ifelse(p < .001, "< .001", sprintf("%.3f", p))
+
+message(sprintf("RQ3a groups: N_AI = %d, N_HU = %d", nrow(d_grp_ai), nrow(d_grp_human)))
+```
+
+## 6.1 Normality Check (Q-Q Plots)
+
+Q-Q plots compare the observed distribution to a theoretical normal distribution. Points on the diagonal indicate normality; S-curves indicate heavy tails; bends at extremes indicate floor/ceiling effects. Mild ceiling bends are expected on a 1–5 scale.
+
+The t-test is robust to mild violations with N ≥ 30. Shapiro-Wilk results are stored in a hidden chunk for reference; with N_AI ≈ 400 the test is overpowered and a significant result may reflect trivially small deviations — Q-Q plots are the primary diagnostic.
+
+```{r}
+#| label: fig-qq-rq3a
+#| fig-cap: "Normal Q-Q plots for LLM scores by need dimension and group (RQ3a normality check). Points on the diagonal indicate normality; bends at extremes reflect the bounded 1–5 scale."
+#| echo: false
+#| fig-width: 10
+#| fig-height: 6
+#| fig-dpi: 300
+
+fig_qq_rq3a <- d |>
+  pivot_longer(
+    cols      = c(llm_aut_mean, llm_com_mean, llm_rel_mean),
+    names_to  = "variable",
+    values_to = "llm_score"
+  ) |>
+  mutate(
+    Need  = case_when(
+      variable == "llm_aut_mean" ~ TABLE_LABEL_AUT,
+      variable == "llm_com_mean" ~ TABLE_LABEL_COM,
+      variable == "llm_rel_mean" ~ TABLE_LABEL_REL
+    ),
+    Group = c(AI = LABEL_AI, HU = LABEL_HU)[as.character(id_type)]
+  ) |>
+  ggplot(aes(sample = llm_score, color = Group)) +
+  stat_qq() + stat_qq_line() +
+  facet_grid(Group ~ Need) +
+  scale_color_manual(values = setNames(c(COL_AI_LINE, COL_HU_LINE), c(LABEL_AI, LABEL_HU))) +
+  labs(title = "Q-Q Plots: LLM Scores by Need and Group",
+       x = "Theoretical Quantiles", y = "Sample Quantiles", color = LABEL_SAMPLE) +
+  theme_classic(base_family = THESIS_FONT, base_size = THESIS_FONTSIZE) +
+  theme(strip.background = element_blank(), strip.text = element_text(face = "bold"),
+        legend.position = "none")
+
+fig_qq_rq3a
+
+
+
+```
+
+
+
+```{r}
+#| include: false
+
+# Alternative qqplot
+# 1. Prepare the long data (using your existing logic)
+# d_long <- d |>
+#   pivot_longer(
+#     cols      = c(llm_aut_mean, llm_com_mean, llm_rel_mean),
+#     names_to  = "variable",
+#     values_to = "llm_score"
+#   ) |>
+#   mutate(
+#     Need  = case_when(
+#       variable == "llm_aut_mean" ~ TABLE_LABEL_AUT,
+#       variable == "llm_com_mean" ~ TABLE_LABEL_COM,
+#       variable == "llm_rel_mean" ~ TABLE_LABEL_REL
+#     ),
+#     Group = as.factor(id_type) # Ensure Group is a factor
+#   )
+# 
+# # 2. Fit the linear model (Interaction model: Score ~ Group * Need)
+# model_rq3a <- lm(llm_score ~ Group * Need, data = d_long)
+# rm(d_long)
+# 
+# library(car)
+# # Creates a QQ Plot with a 95% confidence envelope
+# qqPlot(residuals(model_rq3a), distribution="norm", id=TRUE)
+
+
+```
+
+Alternative: z-scored QQ Plot
+
+```{r}
+#| label: fig-qq-rq3a-zscore
+#| fig-cap: "Normal Q-Q plots (z-scored) for LLM scores by need dimension and group (RQ3a normality check). Red line is the theoretical normal reference."
+#| echo: false
+#| fig-width: 10
+#| fig-height: 7
+
+# Extract by group
+aut_ai <- d$llm_aut_mean[d$id_type == "AI"]
+com_ai <- d$llm_com_mean[d$id_type == "AI"]
+rel_ai <- d$llm_rel_mean[d$id_type == "AI"]
+aut_hu <- d$llm_aut_mean[d$id_type == "HU"]
+com_hu <- d$llm_com_mean[d$id_type == "HU"]
+rel_hu <- d$llm_rel_mean[d$id_type == "HU"]
+
+# Z-score each vector
+z_aut_ai <- (aut_ai - mean(aut_ai)) / sd(aut_ai)
+z_com_ai <- (com_ai - mean(com_ai)) / sd(com_ai)
+z_rel_ai <- (rel_ai - mean(rel_ai)) / sd(rel_ai)
+z_aut_hu <- (aut_hu - mean(aut_hu)) / sd(aut_hu)
+z_com_hu <- (com_hu - mean(com_hu)) / sd(com_hu)
+z_rel_hu <- (rel_hu - mean(rel_hu)) / sd(rel_hu)
+
+ylim <- c(-4, 4)
+par(mfrow = c(2, 3))
+
+qqnorm(z_aut_ai, main = paste0(LABEL_AI, ": ", TABLE_LABEL_AUT, ", z-score"), cex = 0.7, ylim = ylim)
+qqline(z_aut_ai, col = "red")
+qqnorm(z_com_ai, main = paste0(LABEL_AI, ": ", TABLE_LABEL_COM, ", z-score"), cex = 0.7, ylim = ylim)
+qqline(z_com_ai, col = "red")
+qqnorm(z_rel_ai, main = paste0(LABEL_AI, ": ", TABLE_LABEL_REL, ", z-score"), cex = 0.7, ylim = ylim)
+qqline(z_rel_ai, col = "red")
+qqnorm(z_aut_hu, main = paste0(LABEL_HU, ": ", TABLE_LABEL_AUT, ", z-score"), cex = 0.7, ylim = ylim)
+qqline(z_aut_hu, col = "red")
+qqnorm(z_com_hu, main = paste0(LABEL_HU, ": ", TABLE_LABEL_COM, ", z-score"), cex = 0.7, ylim = ylim)
+qqline(z_com_hu, col = "red")
+qqnorm(z_rel_hu, main = paste0(LABEL_HU, ": ", TABLE_LABEL_REL, ", z-score"), cex = 0.7, ylim = ylim)
+qqline(z_rel_hu, col = "red")
+
+rm(aut_ai, com_ai, rel_ai, aut_hu, com_hu, rel_hu,
+   z_aut_ai, z_com_ai, z_rel_ai, z_aut_hu, z_com_hu, z_rel_hu)
+```
+
+
+
+
+```{r}
+#| label: shapiro-rq3a
+#| include: false
+
+# Layer D: Shapiro-Wilk — reference only; overpowered at N ≈ 400
+shapiro_rq3a <- lapply(
+  setNames(c("llm_aut_mean", "llm_com_mean", "llm_rel_mean"),
+           c(TABLE_LABEL_AUT, TABLE_LABEL_COM, TABLE_LABEL_REL)),
+  function(col) list(AI = shapiro.test(d_grp_ai[[col]]),
+                     HU = shapiro.test(d_grp_human[[col]]))
+)
+message("Shapiro-Wilk (overpowered at N ≈ 400; use Q-Q plots as primary diagnostic):")
+for (nm in names(shapiro_rq3a)) {
+  message(sprintf("  %s — AI: W=%.3f p=%.4f | HU: W=%.3f p=%.4f", nm,
+    shapiro_rq3a[[nm]]$AI$statistic, shapiro_rq3a[[nm]]$AI$p.value,
+    shapiro_rq3a[[nm]]$HU$statistic, shapiro_rq3a[[nm]]$HU$p.value))
+}
+```
+
+## 6.2 Normality Check correlations (Q-Q Plots)
+
+For Pearson r to be valid, both variables should be approximately normally distributed within each group. With N_AI ≈ 400, mild violations are less consequential.
+
+```{r}
+#| label: fig-qq-rq3b
+#| fig-cap: "Normal Q-Q plots for LLM and questionnaire scores by need dimension and group (RQ3b normality check for Pearson correlation). Rows: AI surrogates and human participants × LLM/questionnaire score type."
+#| echo: false
+#| fig-width: 10
+#| fig-height: 10
+
+fig_qq_rq3b <- d |>
+  pivot_longer(
+    cols      = c(llm_aut_mean, llm_com_mean, llm_rel_mean,
+                  q_aut_mean,   q_com_mean,   q_rel_mean),
+    names_to  = "variable", values_to = "score"
+  ) |>
+  mutate(
+    Need = case_when(
+      variable %in% c("llm_aut_mean", "q_aut_mean") ~ TABLE_LABEL_AUT,
+      variable %in% c("llm_com_mean", "q_com_mean") ~ TABLE_LABEL_COM,
+      variable %in% c("llm_rel_mean", "q_rel_mean") ~ TABLE_LABEL_REL
+    ),
+    `Score Type` = case_when(
+      variable %in% c("llm_aut_mean", "llm_com_mean", "llm_rel_mean") ~ "LLM Score",
+      variable %in% c("q_aut_mean",   "q_com_mean",   "q_rel_mean")   ~ "Questionnaire Score"
+    ),
+    Group = c(AI = LABEL_AI, HU = LABEL_HU)[as.character(id_type)]
+  ) |>
+  ggplot(aes(sample = score, color = Group)) +
+  stat_qq() + stat_qq_line() +
+  facet_grid(Group + `Score Type` ~ Need) +
+  scale_color_manual(values = setNames(c(COL_AI_LINE, COL_HU_LINE), c(LABEL_AI, LABEL_HU))) +
+  labs(title = "Q-Q Plots: LLM and Questionnaire Scores by Need and Group",
+       x = "Theoretical Quantiles", y = "Sample Quantiles", color = LABEL_SAMPLE) +
+  theme_classic(base_family = THESIS_FONT, base_size = THESIS_FONTSIZE) +
+  theme(strip.background = element_blank(), strip.text = element_text(face = "bold"),
+        legend.position = "none")
+
+fig_qq_rq3b
+```
+
+
+## 6.3 Bivariate Normality Test (Mardia's Test)
+
+Pearson r requires that the *joint* distribution of (LLM score, questionnaire score) be approximately bivariate normal — univariate normality of each variable separately (sections 6.1–6.2) is necessary but not sufficient. Mardia's test assesses bivariate normality via multivariate skewness and multivariate kurtosis; both statistics yield a p-value under the null of bivariate normality. The test is run separately for each group (AI surrogates, human participants) × need dimension combination, giving 6 tests total. With N_AI ≈ 400 the test is sensitive to small violations; Q-Q plots (section 6.2) and scatter plots (section 5) remain the primary visual diagnostic. Fisher's z-transformation of Pearson r is asymptotically valid regardless of the marginal distributions, so modest violations are not disqualifying.
+
+```{r}
+#| label: tbl-biv-normality-mardia
+#| tbl-cap: "Mardia's Bivariate Normality Tests for LLM Score and Questionnaire Score Pairs by Need Dimension and Group (RQ3b Assumption Check)"
+#| echo: false
+#| warning: false
+#| message: false
+
+biv_norm_cols <- list(
+  Autonomy    = list(llm = "llm_aut_mean", q = "q_aut_mean"),
+  Competence  = list(llm = "llm_com_mean", q = "q_com_mean"),
+  Relatedness = list(llm = "llm_rel_mean", q = "q_rel_mean")
+)
+
+biv_norm_results <- do.call(rbind, lapply(names(biv_norm_cols), function(need_label) {
+  llm_col <- biv_norm_cols[[need_label]]$llm
+  q_col   <- biv_norm_cols[[need_label]]$q
+
+  results <- lapply(list(AI = d_grp_ai, HU = d_grp_human), function(grp) {
+    x     <- as.matrix(grp[, c(llm_col, q_col)])
+    n     <- nrow(x); p <- ncol(x)
+    S_inv <- solve(cov(x))
+    z     <- sweep(x, 2, colMeans(x))
+    M     <- z %*% S_inv %*% t(z)
+    b1p   <- sum(M^3) / n^2
+    b2p   <- sum(diag(M)^2) / n
+    skew_stat <- n * b1p / 6
+    skew_df   <- p * (p + 1) * (p + 2) / 6
+    kurt_z    <- (b2p - p * (p + 2)) / sqrt(8 * p * (p + 2) / n)
+    data.frame(
+      Skewness_chi2 = skew_stat,
+      Skewness_p    = pchisq(skew_stat, df = skew_df, lower.tail = FALSE),
+      Kurtosis_z    = kurt_z,
+      Kurtosis_p    = 2 * pnorm(-abs(kurt_z)),
+      stringsAsFactors = FALSE
+    )
+  })
+
+  rbind(
+    cbind(Need = need_label, Group = LABEL_AI, results$AI),
+    cbind(Need = need_label, Group = LABEL_HU, results$HU)
+  )
+}))
+
+biv_norm_results |>
+  dplyr::mutate(
+    `χ²(skew)` = round(as.numeric(Skewness_chi2), 2),
+    `p (skew)`  = fmt_p(as.numeric(Skewness_p)),
+    `z(kurt)`   = round(as.numeric(Kurtosis_z),    2),
+    `p (kurt)`  = fmt_p(as.numeric(Kurtosis_p))
+  ) |>
+  dplyr::select(Need, Group, `χ²(skew)`, `p (skew)`, `z(kurt)`, `p (kurt)`) |>
+  flextable() |>
+  style_apa7() |>
+  merge_v(j = "Need") |>
+  add_apa_note(paste0(
+    "Mardia’s test assesses bivariate normality of the (LLM score, questionnaire score) pair (Mardia 1970). ",
+    "χ²(skew) = multivariate skewness statistic; z(kurt) = multivariate kurtosis z-score. ",
+    "p < .05 indicates departure from bivariate normality. ",
+    "With N ≈ 400 (AI group), the test is sensitive to minor violations. ",
+    "Fisher’s z-transformation of Pearson r remains asymptotically valid under mild departures. ",
+    LABEL_AI, " N = ", nrow(d_grp_ai), "; ", LABEL_HU, " N = ", nrow(d_grp_human), "."
+  ))
+```
+
+```{r}
+#| label: fig-biv-normality-qqplot
+#| fig-cap: "Chi-square Q-Q plots of squared Mahalanobis distances for the (LLM score, questionnaire score) pair by need dimension and group (bivariate normality check). Under bivariate normality, distances follow a χ²(2) distribution and points should fall on the diagonal. Systematic upward curvature indicates heavy tails; downward curvature indicates light tails."
+#| echo: false
+#| fig-width: 8
+#| fig-height: 5
+#| fig-dpi: 300
+#| warning: false
+
+mah_data <- do.call(rbind, lapply(names(biv_norm_cols), function(need_label) {
+  llm_col <- biv_norm_cols[[need_label]]$llm
+  q_col   <- biv_norm_cols[[need_label]]$q
+
+  rbind(
+    local({
+      mat <- as.matrix(d_grp_ai[, c(llm_col, q_col)])
+      d2  <- mahalanobis(mat, colMeans(mat), cov(mat))
+      n   <- length(d2)
+      data.frame(Need  = factor(need_label, levels = c(TABLE_LABEL_AUT, TABLE_LABEL_COM, TABLE_LABEL_REL)),
+                 Group = factor(LABEL_AI, levels = c(LABEL_AI, LABEL_HU)),
+                 d2 = sort(d2), chi2 = qchisq(ppoints(n), df = 2))
+    }),
+    local({
+      mat <- as.matrix(d_grp_human[, c(llm_col, q_col)])
+      d2  <- mahalanobis(mat, colMeans(mat), cov(mat))
+      n   <- length(d2)
+      data.frame(Need  = factor(need_label, levels = c(TABLE_LABEL_AUT, TABLE_LABEL_COM, TABLE_LABEL_REL)),
+                 Group = factor(LABEL_HU, levels = c(LABEL_AI, LABEL_HU)),
+                 d2 = sort(d2), chi2 = qchisq(ppoints(n), df = 2))
+    })
+  )
+}))
+
+ggplot(mah_data, aes(x = chi2, y = d2, colour = Group)) +
+  geom_point(alpha = 0.35, size = 0.9, stroke = 0) +
+  geom_abline(slope = 1, intercept = 0, colour = "grey40", linetype = "dashed", linewidth = 0.6) +
+  facet_grid(Group ~ Need) +
+  scale_colour_manual(values = setNames(c(COL_AI_LINE, COL_HU_LINE), c(LABEL_AI, LABEL_HU))) +
+  labs(x = expression(chi^2*(2)*" quantiles"), y = "Squared Mahalanobis distance") +
+  theme_classic(base_family = THESIS_FONT, base_size = THESIS_FONTSIZE) +
+  theme(
+    strip.background = element_blank(),
+    strip.text       = element_text(face = "bold"),
+    legend.position  = "none"
+  )
+```
+
+## 6.4 Linearity Check (LOESS vs. OLS)
+
+The scatter plots below show LLM score (x) against questionnaire subscale score (y) for each group × need combination. The LOESS smoother (solid) and OLS fit (dashed) are overlaid; close agreement between the two lines supports the linearity assumption required for Pearson *r*. Points are jittered to reveal density at the integer-valued scores.
+
+```{r}
+#| label: fig-rq3b-assump-scatter
+#| fig-cap: "Scatter plots of LLM score (x-axis) vs. questionnaire subscale score (y-axis) by need dimension and group. Points are jittered to reveal density. Solid line = LOESS smoother; dashed line = OLS regression fit. Pearson r is shown per panel."
+#| echo: false
+#| fig-width: 9
+#| fig-height: 6
+#| fig-dpi: 300
+#| warning: false
+
+# r labels (computed directly — rq3b_results is defined later in section 8)
+r_labels_lin <- d |>
+  group_by(id_type) |>
+  summarise(
+    aut = round(cor(llm_aut_mean, q_aut_mean, use = "complete.obs"), 2),
+    com = round(cor(llm_com_mean, q_com_mean, use = "complete.obs"), 2),
+    rel = round(cor(llm_rel_mean, q_rel_mean, use = "complete.obs"), 2),
+    .groups = "drop"
+  ) |>
+  pivot_longer(cols = c(aut, com, rel), names_to = "need", values_to = "r") |>
+  mutate(
+    Need  = factor(case_when(
+      need == "aut" ~ TABLE_LABEL_AUT,
+      need == "com" ~ TABLE_LABEL_COM,
+      need == "rel" ~ TABLE_LABEL_REL
+    ), levels = c(TABLE_LABEL_AUT, TABLE_LABEL_COM, TABLE_LABEL_REL)),
+    Group = factor(c(AI = LABEL_AI, HU = LABEL_HU)[as.character(id_type)],
+                   levels = c(LABEL_AI, LABEL_HU)),
+    label = paste0("r = ", sprintf("%.2f", r)),
+    x_pos = 1.2,
+    y_pos = 4.85
+  )
+
+d |>
+  pivot_longer(
+    cols          = c(llm_aut_mean, llm_com_mean, llm_rel_mean,
+                      q_aut_mean,   q_com_mean,   q_rel_mean),
+    names_to      = c("source", "need"),
+    names_pattern = "(llm|q)_(aut|com|rel)_mean"
+  ) |>
+  pivot_wider(names_from = source, values_from = value) |>
+  mutate(
+    Need  = factor(case_when(
+      need == "aut" ~ TABLE_LABEL_AUT,
+      need == "com" ~ TABLE_LABEL_COM,
+      need == "rel" ~ TABLE_LABEL_REL
+    ), levels = c(TABLE_LABEL_AUT, TABLE_LABEL_COM, TABLE_LABEL_REL)),
+    Group = factor(c(AI = LABEL_AI, HU = LABEL_HU)[as.character(id_type)],
+                   levels = c(LABEL_AI, LABEL_HU))
+  ) |>
+  ggplot(aes(x = llm, y = q)) +
+  geom_jitter(alpha = 0.25, size = 1.2, width = 0.15, height = 0.15, stroke = 0,
+              aes(colour = Group)) +
+  geom_smooth(method = "loess", aes(colour = Group), se = FALSE,
+              linewidth = 0.7, formula = y ~ x,
+              method.args = list(span = 1)) +
+  geom_smooth(method = "lm", colour = "firebrick", linetype = "dashed",
+              se = FALSE, linewidth = 0.7, formula = y ~ x) +
+  geom_text(
+    data        = r_labels_lin,
+    aes(x = x_pos, y = y_pos, label = label),
+    hjust       = 0, size = 3, colour = "grey30", inherit.aes = FALSE
+  ) +
+  facet_grid(Group ~ Need) +
+  scale_colour_manual(values = setNames(c(COL_AI_LINE, COL_HU_LINE), c(LABEL_AI, LABEL_HU))) +
+  scale_x_continuous(limits = c(0.8, 5.2), breaks = c(1, 3, 5)) +
+  scale_y_continuous(limits = c(0.8, 5.2), breaks = c(1, 3, 5)) +
+  labs(x = "LLM score", y = "Questionnaire score") +
+  theme_minimal(base_size = THESIS_FONTSIZE) +
+  theme(
+    text             = element_text(family = THESIS_FONT),
+    panel.grid.minor = element_blank(),
+    strip.text       = element_text(face = "bold"),
+    legend.position  = "none"
+  )
+```
+
+
+# 7 RQ3a — Distributional Equivalence of LLM Scores
+
+RQ3a tests whether AI surrogate and human participant LLM scores differ in means and variance. Welch's t-test (unequal variances) and the standard t-test (equal variances assumed) are both reported to assess sensitivity to the variance assumption. Levene's test (mean-centered) checks whether variances differ between groups. The primary effect size measure is the raw mean difference Δ = M_AI − M_human with 95% bootstrapped CI, preferred over standardized d because a high Cohen's d with low SD would itself indicate a distributional problem rather than a meaningful effect (Analytical Strategy v2026-03-24). Three tests are run (one per need dimension). These are treated as independent per-dimension questions rather than as a family requiring correction; each need dimension constitutes a separate hypothesis (RQ3a) and the study is exploratory. Accordingly, no family-wise correction is applied.
+
+## 7.1  Welch t-Test, Standard t-Test, Levene Test, and Bootstrapped Δ
+
+```{r}
+#| label: rq3a-tests
+#| include: false
+
+set.seed(2026)
+# Layer C: statistical tests per need
+need_cols <- setNames(
+  c("llm_aut_mean", "llm_com_mean", "llm_rel_mean"),
+  c(TABLE_LABEL_AUT, TABLE_LABEL_COM, TABLE_LABEL_REL)
+)
+
+rq3a_results <- lapply(names(need_cols), function(need_label) {
+  col    <- need_cols[[need_label]]
+  ai_vec <- d_grp_ai[[col]]
+  hu_vec <- d_grp_human[[col]]
+
+  t_welch    <- t.test(ai_vec, hu_vec, var.equal = FALSE)
+  t_standard <- t.test(ai_vec, hu_vec, var.equal = TRUE)
+
+  levene_data <- data.frame(score = d[[col]], id_type = d$id_type)
+  levene      <- car::leveneTest(score ~ id_type, data = levene_data, center = "mean")
+
+  # Bootstrap CIs for ΔM and ΔSD; stratified resampling preserves group sizes
+  boot_data <- data.frame(score = d[[col]], id_type = d$id_type)
+  boot_strata <- as.integer(factor(d$id_type))
+
+  boot_fn_delta <- function(data, i) {
+    db <- data[i, ]
+    mean(db$score[db$id_type == "AI"]) - mean(db$score[db$id_type == "HU"])
+  }
+  boot_obj <- boot::boot(boot_data, boot_fn_delta, R = BOOTSTRAP_SAMPLES, strata = boot_strata)
+  ci <- boot::boot.ci(boot_obj, type = "perc")
+
+  boot_fn_delta_sd <- function(data, i) {
+    db <- data[i, ]
+    sd(db$score[db$id_type == "AI"]) - sd(db$score[db$id_type == "HU"])
+  }
+  boot_obj_sd <- boot::boot(boot_data, boot_fn_delta_sd, R = BOOTSTRAP_SAMPLES, strata = boot_strata)
+  ci_sd <- boot::boot.ci(boot_obj_sd, type = "perc")
+
+  # Flag if Welch and standard t diverge — Levene p < .05 explains the divergence
+  if (abs(t_welch$statistic - t_standard$statistic) > 0.5) {
+    message(sprintf(
+      "Note (%s): Welch t (%.2f) and standard t (%.2f) diverge. Levene p = %.3f.",
+      need_label, t_welch$statistic, t_standard$statistic, levene[1, "Pr(>F)"]))
+  }
+
+  data.frame(
+    need       = need_label,
+    m_ai       = mean(ai_vec),   sd_ai    = sd(ai_vec),
+    m_hu       = mean(hu_vec),   sd_hu    = sd(hu_vec),
+    delta      = mean(ai_vec) - mean(hu_vec),
+    ci_lo      = ci$percent[4],    ci_hi    = ci$percent[5],
+    delta_sd   = sd(ai_vec) - sd(hu_vec),
+    sd_ci_lo   = ci_sd$percent[4], sd_ci_hi = ci_sd$percent[5],
+    welch_t    = as.numeric(t_welch$statistic),
+    welch_df   = as.numeric(t_welch$parameter),
+    welch_p    = t_welch$p.value,
+    std_t      = as.numeric(t_standard$statistic),
+    std_df     = as.numeric(t_standard$parameter),
+    std_p      = t_standard$p.value,
+    levene_f   = as.numeric(levene[1, "F value"]),
+    levene_df1 = as.integer(levene[1, "Df"]),
+    levene_df2 = as.integer(levene[2, "Df"]),
+    levene_p   = as.numeric(levene[1, "Pr(>F)"]),
+    sd_ratio   = sd(ai_vec) / sd(hu_vec),
+    stringsAsFactors = FALSE
+  )
+})
+
+rq3a_df <- dplyr::bind_rows(rq3a_results)
+```
+
+
+
+```{r}
+#| label: tbl-rq3a-desc-groupmeans
+#| tbl-cap: "Mean and SD of LLM Scores by Need Dimension and Group (RQ3a: Distributional Equivalence)"
+#| echo: false
+
+tbl_rq3a_desc_groupmeans <- rq3a_df |>
+  transmute(
+    Need        = need,
+    `M (AI)`    = round(m_ai,              2),
+    `SD (AI)`   = round(sd_ai,             2),
+    `M (Human)` = round(m_hu,              2),
+    `SD (Human)`= round(sd_hu,             2),
+    `ΔM`        = round(m_ai  - m_hu,      2),
+    `ΔSD`       = round(sd_ai - sd_hu,     2)
+  ) |>
+  flextable() |>
+  style_apa7() |>
+  add_apa_note(paste0(
+    "LLM scores on a 1–5 scale. ",
+    "ΔM = M(AI) − M(Human); ΔSD = SD(AI) − SD(Human). ",
+    "Positive ΔSD indicates AI surrogates have higher variance. ",
+    LABEL_AI, " N = ", nrow(d_grp_ai), "; ", LABEL_HU, " N = ", nrow(d_grp_human), "."
+  ))
+
+tbl_rq3a_desc_groupmeans
+```
+
+```{r}
+#| label: tbl-rq3a-welch-levene
+#| tbl-cap: "Mean and Variance Differences in LLM Scores Between AI Surrogates and Human Participants with Welch's t-Test and Levene's Variance Test (RQ3a)"
+#| echo: false
+
+tbl_rq3a_welch_levene <- rq3a_df |>
+  transmute(
+    Need                = need,
+    `ΔM [95% CI]`       = sprintf("%.2f [%.2f, %.2f]", delta, ci_lo, ci_hi),
+    `ΔSD [95% CI]`      = sprintf("%.2f [%.2f, %.2f]", delta_sd, sd_ci_lo, sd_ci_hi),
+    `Welch t(df)`       = sprintf("%.2f (%.1f)", welch_t, welch_df),
+    `p (Welch)`         = fmt_p(welch_p),
+    `Standard t(df)`    = sprintf("%.2f (%.1f)", std_t, std_df),
+    `p (std.)`          = fmt_p(std_p),
+    `Levene F(df₁,df₂)` = sprintf("%.2f(%d,%d)", levene_f, levene_df1, levene_df2),
+    `p (Levene)`        = fmt_p(levene_p)
+  ) |>
+  flextable() |>
+  style_apa7() |>
+  add_apa_note(paste0(
+    "ΔM = M_AI − M_Human; ΔSD = SD_AI − SD_Human. ",
+    "CIs: 95% bootstrap percentile (R = ", BOOTSTRAP_SAMPLES, ", stratified by group). ",
+    "Welch's t-test does not assume equal variances; both versions reported for sensitivity. ",
+    "Levene's test (mean-centered): p < .05 indicates unequal variances. ",
+    "If Welch and standard t diverge substantially, Levene p < .05 indicates variance drives the difference."
+  ))
+
+tbl_rq3a_welch_levene
+```
+## 7.2 Means and SDs bootstrapped
+
+```{r}
+#| label: rq3a-boot-ci
+#| include: false
+
+set.seed(2026)
+# Bootstrap CIs for group-level M and SD per need (separate from the delta bootstrap above)
+boot_rq3a_list <- lapply(names(need_cols), function(need_label) {
+  col    <- need_cols[[need_label]]
+  ai_vec <- d_grp_ai[[col]]
+  hu_vec <- d_grp_human[[col]]
+
+  ci_m_ai  <- boot::boot.ci(boot::boot(ai_vec, function(x, i) mean(x[i]), R = BOOTSTRAP_SAMPLES), type = "perc")
+  ci_m_hu  <- boot::boot.ci(boot::boot(hu_vec, function(x, i) mean(x[i]), R = BOOTSTRAP_SAMPLES), type = "perc")
+  ci_sd_ai <- boot::boot.ci(boot::boot(ai_vec, function(x, i)   sd(x[i]), R = BOOTSTRAP_SAMPLES), type = "perc")
+  ci_sd_hu <- boot::boot.ci(boot::boot(hu_vec, function(x, i)   sd(x[i]), R = BOOTSTRAP_SAMPLES), type = "perc")
+
+  data.frame(
+    need      = need_label,
+    group     = c(LABEL_AI,            LABEL_HU),
+    m         = c(mean(ai_vec),         mean(hu_vec)),
+    m_ci_lo   = c(ci_m_ai$percent[4],   ci_m_hu$percent[4]),
+    m_ci_hi   = c(ci_m_ai$percent[5],   ci_m_hu$percent[5]),
+    sd        = c(sd(ai_vec),            sd(hu_vec)),
+    sd_ci_lo  = c(ci_sd_ai$percent[4],  ci_sd_hu$percent[4]),
+    sd_ci_hi  = c(ci_sd_ai$percent[5],  ci_sd_hu$percent[5]),
+    stringsAsFactors = FALSE
+  )
+})
+
+boot_rq3a_df <- dplyr::bind_rows(boot_rq3a_list) |>
+  dplyr::mutate(
+    need  = factor(need,  levels = c(TABLE_LABEL_AUT, TABLE_LABEL_COM, TABLE_LABEL_REL)),
+    group = factor(group, levels = c(LABEL_AI, LABEL_HU))
+  )
+```
+
+
+```{r}
+#| label: fig-rq3a-mean-bars
+#| fig-cap: "Mean LLM scores by need dimension and group (RQ3a). Bars = observed mean; error bars = ±1 SD."
+#| echo: false
+#| fig-width: 7
+#| fig-height: 4
+#| fig-dpi: 300
+
+ggplot(boot_rq3a_df, aes(x = need, y = m, fill = group)) +
+  geom_col(position = position_dodge(width = 0.7), width = 0.6) +
+  geom_errorbar(
+    aes(ymin = m - sd, ymax = m + sd),
+    position = position_dodge(width = 0.7),
+    width = 0.25, linewidth = 0.6
+  ) +
+  scale_fill_manual(values = setNames(c(COL_AI_LINE, COL_HU_LINE), c(LABEL_AI, LABEL_HU))) +
+  coord_cartesian(ylim = c(1, 5)) +
+  labs(
+    title    = "RQ3a: Mean LLM Scores by Need and Group",
+    subtitle = "Error bars = ±1 SD",
+    x        = "Need Dimension",
+    y        = "Mean LLM Score",
+    fill     = LABEL_SAMPLE
+  ) +
+  theme_minimal(base_size = THESIS_FONTSIZE) +
+  theme(
+    text            = element_text(family = THESIS_FONT),
+    legend.position = "bottom",
+    strip.text      = element_text(face = "bold")
+  )
+```
+
+
+### Means and SDs — shaded CIs
+
+```{r}
+#| label: fig-rq3a-mean-ci
+#| fig-cap: "Mean LLM scores by need dimension and group (RQ3a). Error bars = 95% bootstrap CIs. Yellow bracket = Δ mean (AI − Human)."
+#| echo: false
+#| fig-width: 6
+#| fig-height: 4
+#| fig-dpi: 500
+
+DODGE_W <- 0.1
+TICK_W  <- 0.10
+
+group_colors_rq3a <- c(
+  setNames(COL_AI_LINE, LABEL_AI),
+  setNames(COL_HU_LINE, LABEL_HU)
+)
+
+fig_rq3a_mean_data <- boot_rq3a_df |>
+  dplyr::mutate(x = as.numeric(need) + ifelse(group == LABEL_HU, -DODGE_W, DODGE_W))
+
+bracket_m <- boot_rq3a_df |>
+  dplyr::select(need, group, m) |>
+  tidyr::pivot_wider(names_from = group, values_from = m) |>
+  dplyr::rename(y_ai = dplyr::all_of(LABEL_AI), y_hu = dplyr::all_of(LABEL_HU)) |>
+  dplyr::mutate(x_arm = as.numeric(need))
+
+fig_rq3a_mean_ci <- ggplot(fig_rq3a_mean_data,
+    aes(x = x, y = m, color = group, fill = group, group = group)) +
+  geom_errorbar(aes(ymin = m_ci_lo, ymax = m_ci_hi), width = 0, linewidth = 0.8) +
+  geom_point(shape = 21, fill = "white", size = 1.5, stroke = 1.8) +
+  geom_segment(data = bracket_m,
+    aes(x = x_arm, xend = x_arm, y = y_hu, yend = y_ai),
+    color = COL_DIFF, linewidth = 0.25, inherit.aes = FALSE) +
+  geom_segment(data = bracket_m,
+    aes(x = x_arm - TICK_W, xend = x_arm + TICK_W, y = y_ai, yend = y_ai),
+    color = COL_DIFF, linewidth = 0.25, inherit.aes = FALSE) +
+  geom_segment(data = bracket_m,
+    aes(x = x_arm - TICK_W, xend = x_arm + TICK_W, y = y_hu, yend = y_hu),
+    color = COL_DIFF, linewidth = 0.25, inherit.aes = FALSE) +
+  scale_x_continuous(
+    breaks   = seq_along(levels(boot_rq3a_df$need)),
+    labels   = levels(boot_rq3a_df$need),
+    limits   = c(0.6, 3.6),
+    position = "top"
+  ) +
+  scale_color_manual(values = group_colors_rq3a, name = NULL) +
+  scale_fill_manual(values  = group_colors_rq3a, name = NULL) +
+  guides(color = guide_legend(reverse = TRUE), fill = guide_legend(reverse = TRUE)) +
+  coord_cartesian(ylim = c(1, 5)) +
+  labs(x = NULL, y = "Mean LLM Score") +
+  theme_minimal(base_size = THESIS_FONTSIZE) +
+  theme(
+    text               = element_text(family = THESIS_FONT),
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor.x = element_blank(),
+    axis.text.x.top    = element_text(colour = "black"),
+    panel.grid.major.y = element_line(linewidth = 0.3),
+    panel.grid.minor.y = element_line(linewidth = 0.3),
+    axis.title.y         = element_text(margin = margin(r = 12)),
+    legend.position      = c(0.2, 0.15),
+    legend.direction     = "horizontal",
+    legend.margin        = margin(t = 4),
+    legend.background    = element_rect(fill = "white", color = NA),
+    legend.key           = element_blank(),
+    legend.title         = element_text(face = "plain")
+  )
+
+fig_rq3a_mean_ci
+```
+
+*Note.* Error bars = 95% bootstrap CIs (R = `r BOOTSTRAP_SAMPLES`). AI surrogates N = `r nrow(d_grp_ai)`; Humans N = `r nrow(d_grp_human)`. Yellow bracket = Δ mean (AI − Human).
+
+```{r}
+#| label: fig-rq3a-sd-ci
+#| fig-cap: "SD of LLM scores by need dimension and group (RQ3a). Error bars = 95% bootstrap CIs. Yellow bracket = Δ SD (AI − Human)."
+#| echo: false
+#| fig-width: 6
+#| fig-height: 4
+#| fig-dpi: 500
+
+bracket_sd <- boot_rq3a_df |>
+  dplyr::select(need, group, sd) |>
+  tidyr::pivot_wider(names_from = group, values_from = sd) |>
+  dplyr::rename(y_ai = dplyr::all_of(LABEL_AI), y_hu = dplyr::all_of(LABEL_HU)) |>
+  dplyr::mutate(x_arm = as.numeric(need))
+
+fig_rq3a_sd_ci <- ggplot(
+    boot_rq3a_df |> dplyr::mutate(x = as.numeric(need) + ifelse(group == LABEL_HU, -DODGE_W, DODGE_W)),
+    aes(x = x, y = sd, color = group, fill = group, group = group)) +
+  geom_errorbar(aes(ymin = sd_ci_lo, ymax = sd_ci_hi), width = 0, linewidth = 0.8) +
+  geom_point(shape = 21, fill = "white", size = 1.5, stroke = 1.8) +
+  geom_segment(data = bracket_sd,
+    aes(x = x_arm, xend = x_arm, y = y_hu, yend = y_ai),
+    color = COL_DIFF, linewidth = 0.25, inherit.aes = FALSE) +
+  geom_segment(data = bracket_sd,
+    aes(x = x_arm - TICK_W, xend = x_arm + TICK_W, y = y_ai, yend = y_ai),
+    color = COL_DIFF, linewidth = 0.25, inherit.aes = FALSE) +
+  geom_segment(data = bracket_sd,
+    aes(x = x_arm - TICK_W, xend = x_arm + TICK_W, y = y_hu, yend = y_hu),
+    color = COL_DIFF, linewidth = 0.25, inherit.aes = FALSE) +
+  scale_x_continuous(
+    breaks   = seq_along(levels(boot_rq3a_df$need)),
+    labels   = levels(boot_rq3a_df$need),
+    limits   = c(0.6, 3.6),
+    position = "top"
+  ) +
+  scale_y_continuous(limits = c(0.15, 0.8)) +
+  scale_color_manual(values = group_colors_rq3a, name = NULL) +
+  scale_fill_manual(values  = group_colors_rq3a, name = NULL) +
+  guides(color = guide_legend(reverse = TRUE), fill = guide_legend(reverse = TRUE)) +
+
+  labs(x = NULL, y = "SD of LLM Score") +
+  theme_minimal(base_size = THESIS_FONTSIZE) +
+  theme(
+    text               = element_text(family = THESIS_FONT),
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor.x = element_blank(),
+    axis.text.x.top    = element_text(colour = "black"),
+    panel.grid.major.y = element_line(linewidth = 0.3),
+    panel.grid.minor.y = element_line(linewidth = 0.3),
+    axis.title.y         = element_text(margin = margin(r = 12)),
+    legend.position      = c(0.25, 0.15),
+    legend.direction     = "horizontal",
+    legend.margin        = margin(t = 4),
+    legend.background    = element_rect(fill = "white", color = NA),
+    legend.key           = element_blank(),
+    legend.title         = element_text(face = "plain")
+  )
+
+fig_rq3a_sd_ci
+
+
+```
+
+*Note.* Error bars = 95% bootstrap CIs (R = `r BOOTSTRAP_SAMPLES`). AI surrogates N = `r nrow(d_grp_ai)`; Humans N = `r nrow(d_grp_human)`. Yellow bracket = Δ SD (AI − Human).
+
+
+# 8 RQ3b — Difference in LLM–Questionnaire Correlations
+
+RQ3b tests whether the LLM–questionnaire correlation differs between AI surrogates and human participants, per need. Pearson r is computed per group and compared using Fisher's z-difference test for independent samples (`psych::r.test`). Spearman ρ is computed as a robustness check; both are reported. The primary metric is Δr = r_AI − r_human with 95% bootstrapped CI. With N_AI ≈ 400 vs. N_HU ≈ 120, p-values are sensitive to small differences and are secondary. 
+
+## 8.1 Preparation
+
+
+### 8.1.1 Compute Pearson r and Spearman ρ
+
+```{r}
+#| label: rq3b-correlations
+#| include: false
+
+set.seed(2026)
+# Layer C: correlations + per-group bootstrap CIs per need
+q_cols <- setNames(
+  c("q_aut_mean", "q_com_mean", "q_rel_mean"),
+  c(TABLE_LABEL_AUT, TABLE_LABEL_COM, TABLE_LABEL_REL)
+)
+
+
+boot_fn_r <- function(data, i) cor(data$llm[i], data$q[i], method = "pearson")
+
+rq3b_results <- lapply(names(need_cols), function(need_label) {
+  llm_col <- need_cols[[need_label]]
+  q_col   <- q_cols[[need_label]]
+
+  r_ai   <- cor(d_grp_ai[[llm_col]],    d_grp_ai[[q_col]],    method = "pearson")
+  r_hu   <- cor(d_grp_human[[llm_col]], d_grp_human[[q_col]], method = "pearson")
+  rho_ai <- cor(d_grp_ai[[llm_col]],    d_grp_ai[[q_col]],    method = "spearman")
+  rho_hu <- cor(d_grp_human[[llm_col]], d_grp_human[[q_col]], method = "spearman")
+
+  boot_ai <- boot::boot(
+    data.frame(llm = d_grp_ai[[llm_col]], q = d_grp_ai[[q_col]]),
+    boot_fn_r, R = BOOTSTRAP_SAMPLES)
+  ci_ai <- boot::boot.ci(boot_ai, type = "perc")
+
+  boot_hu <- boot::boot(
+    data.frame(llm = d_grp_human[[llm_col]], q = d_grp_human[[q_col]]),
+    boot_fn_r, R = BOOTSTRAP_SAMPLES)
+  ci_hu <- boot::boot.ci(boot_hu, type = "perc")
+
+  list(
+    need       = need_label,
+    r_ai       = r_ai,       r_hu       = r_hu,
+    rho_ai     = rho_ai,     rho_hu     = rho_hu,
+    r_ai_ci_lo = ci_ai$percent[4], r_ai_ci_hi = ci_ai$percent[5],
+    r_hu_ci_lo = ci_hu$percent[4], r_hu_ci_hi = ci_hu$percent[5],
+    boot_r_ai  = boot_ai$t[, 1],   # raw bootstrap r values for fig_fisher_transform
+    boot_r_hu  = boot_hu$t[, 1]
+  )
+})
+```
+
+### 8.1.2 Fisher z-Difference Test
+
+Fisher's z-difference test (`psych::r.test`) compares Pearson r values across two independent groups. The function applies the Fisher r-to-z transformation internally (z = 0.5 × ln((1+r)/(1-r))). This transformation is required because raw Pearson r values are not normally distributed — they are bounded [−1, 1] and right-skewed near ±1; the transformation normalizes the distribution, enabling a valid z-test. The parameter names `r12` and `r34` are `psych`'s internal naming convention for "group 1 correlation" and "group 2 correlation" — not meaningful variable names.
+
+```{r}
+#| label: rq3b-fisher
+#| include: false
+
+set.seed(2026)
+# Layer C: Fisher z-difference + bootstrap CI for Δr per need
+boot_fn_delta_r <- function(data, i) {
+  db  <- data[i, ]
+  r_a <- cor(db$llm[db$id_type == "AI"], db$q[db$id_type == "AI"], method = "pearson")
+  r_h <- cor(db$llm[db$id_type == "HU"], db$q[db$id_type == "HU"], method = "pearson")
+  r_a - r_h
+}
+
+rq3b_fisher_results <- lapply(rq3b_results, function(res) {
+  llm_col <- need_cols[[res$need]]
+  q_col   <- q_cols[[res$need]]
+
+  # psych::r.test applies Fisher r-to-z internally
+  fisher_test <- psych::r.test(
+    n   = nrow(d_grp_ai),     # N for AI group
+    r12 = res$r_ai,            # Pearson r, AI group (psych param naming convention)
+    n2  = nrow(d_grp_human),  # N for human group
+    r34 = res$r_hu             # Pearson r, human group (psych param naming convention)
+  )
+
+  # Bootstrap CI for Δr (stratified resampling preserves group sizes)
+  boot_delta <- boot::boot(
+    data.frame(llm = d[[llm_col]], q = d[[q_col]], id_type = d$id_type),
+    boot_fn_delta_r, R = BOOTSTRAP_SAMPLES,
+    strata = as.integer(factor(d$id_type))
+  )
+  ci_delta <- boot::boot.ci(boot_delta, type = "perc")
+
+  data.frame(
+    need        = res$need,
+    delta_r     = res$r_ai - res$r_hu,
+    delta_ci_lo = ci_delta$percent[4],
+    delta_ci_hi = ci_delta$percent[5],
+    delta_se    = sd(boot_delta$t[, 1]),
+    z           = fisher_test$z,
+    p           = fisher_test$p,
+    stringsAsFactors = FALSE
+  )
+})
+
+rq3b_fisher_df <- dplyr::bind_rows(rq3b_fisher_results)
+```
+
+
+## 8.2 RQ3b Results Table
+
+```{r}
+#| label: tbl-rq3b-fisher-zdiff
+#| tbl-cap: "Pearson Correlations Between LLM and Questionnaire Scores by Group and Fisher z-Difference Test (RQ3b)"
+#| echo: false
+
+tbl_rq3b_fisher_zdiff <- dplyr::bind_rows(lapply(rq3b_results, function(x) {
+  data.frame(
+    need  = x$need,
+    r_hu  = sprintf("%.2f [%.2f, %.2f]", x$r_hu, x$r_hu_ci_lo, x$r_hu_ci_hi),
+    r_ai  = sprintf("%.2f [%.2f, %.2f]", x$r_ai, x$r_ai_ci_lo, x$r_ai_ci_hi),
+    stringsAsFactors = FALSE
+  )
+})) |>
+  dplyr::left_join(
+    rq3b_fisher_df |>
+      dplyr::transmute(
+        need,
+        delta = sprintf("%.2f [%.2f, %.2f]", delta_r, delta_ci_lo, delta_ci_hi),
+        Z     = round(z, 2),
+        p     = fmt_p(p)
+      ),
+    by = "need"
+  ) |>
+  flextable() |>
+  style_apa7() |>
+  set_header_labels(
+    need  = LABEL_NEEDS,
+    r_hu  = paste0("r [", CI_LABEL, "]"),
+    r_ai  = paste0("r [", CI_LABEL, "]"),
+    delta = paste0("\u0394r [", CI_LABEL, "]"),
+    Z     = "Z",
+    p     = "p"
+  ) |>
+  add_header_row(
+    values    = c("", LABEL_HU, LABEL_AI, "Difference", "", ""),
+    colwidths = c(1L, 1L, 1L, 1L, 1L, 1L)
+  ) |>
+  add_apa_note(paste0(
+    "r = Pearson correlation between LLM score (mean of 3 repeats) and questionnaire score. ",
+    "CIs: 95% bootstrap percentile (R = ", BOOTSTRAP_SAMPLES, "). ",
+    "\u0394r = r(AI surrogates) \u2212 r(Humans); CI for \u0394r bootstrapped stratified by group. ",
+    "Z and p from Fisher\u2019s z-difference test for independent correlations (psych::r.test). ",
+    LABEL_AI, " N = ", nrow(d_grp_ai), "; ", LABEL_HU, " N = ", nrow(d_grp_human), "."
+  ))
+
+tbl_rq3b_fisher_zdiff
+```
+
+### 8.2.1 Correlation Estimates with SE
+
+The bootstrap percentile method takes the 2.5th and 97.5th percentiles of the bootstrap distribution directly, rather than constructing a symmetric interval around the estimate using ±1.96 × SE. These two approaches only agree when the bootstrap distribution is perfectly normal and symmetric.
+
+```{r}
+#| label: tbl-rq3b-se
+#| tbl-cap: "Pearson Correlations Between LLM and Questionnaire Scores with Bootstrapped SE by Group (RQ3b)"
+#| echo: false
+
+tbl_rq3b_se <- dplyr::bind_rows(lapply(rq3b_results, function(x) {
+  data.frame(
+    need  = x$need,
+    r_hu  = sprintf("%.2f [%.2f, %.2f]", x$r_hu, x$r_hu_ci_lo, x$r_hu_ci_hi),
+    se_hu = sprintf("%.3f", sd(x$boot_r_hu)),
+    r_ai  = sprintf("%.2f [%.2f, %.2f]", x$r_ai, x$r_ai_ci_lo, x$r_ai_ci_hi),
+    se_ai = sprintf("%.3f", sd(x$boot_r_ai)),
+    stringsAsFactors = FALSE
+  )
+})) |>
+  dplyr::left_join(
+    rq3b_fisher_df |>
+      dplyr::transmute(
+        need,
+        delta    = sprintf("%.2f [%.2f, %.2f]", delta_r, delta_ci_lo, delta_ci_hi),
+        se_delta = sprintf("%.3f", delta_se)
+      ),
+    by = "need"
+  ) |>
+  flextable() |>
+  style_apa7() |>
+  set_header_labels(
+    need     = LABEL_NEEDS,
+    r_hu     = paste0("r [", CI_LABEL, "]"),
+    se_hu    = "SE",
+    r_ai     = paste0("r [", CI_LABEL, "]"),
+    se_ai    = "SE",
+    delta    = paste0("Δr [", CI_LABEL, "]"),
+    se_delta = "SE"
+  ) |>
+  add_header_row(
+    values    = c("", LABEL_HU, LABEL_AI, "Difference"),
+    colwidths = c(1L, 2L, 2L, 2L)
+  ) |>
+  add_apa_note(paste0(
+    "r = Pearson correlation between LLM score (mean of 3 repeats) and questionnaire score. ",
+    "SE = standard deviation of the bootstrap distribution (R = ", BOOTSTRAP_SAMPLES, "). ",
+    "CIs: 95% bootstrap percentile. ",
+    "Δr = r(AI surrogates) − r(Humans); SE for Δr bootstrapped stratified by group. ",
+    LABEL_AI, " N = ", nrow(d_grp_ai), "; ", LABEL_HU, " N = ", nrow(d_grp_human), "."
+  ))
+
+tbl_rq3b_se
+```
+
+
+The SEs look modest in absolute terms because correlations are bounded in [−1, +1]. However, they are not small relative to the estimates — they're actually large relative to the effect sizes, which are themselves near zero. Since r is so small, r is approximately normally distributed — that's why the standard formula ±1.96 results in the same CI as the bootstrapped percentiles.
+
+### 8.3 Fisher Transformation Visualization
+
+The plot below shows the bootstrap distribution of raw Pearson r (left column) and Fisher z-transformed values (right column) for each need dimension (rows) and group. Raw r is bounded to [−1, 1] and may be skewed when correlations are moderate to strong; the Fisher z-transformation yields approximately symmetric distributions, which is the assumption required by the z-difference test. For correlations near zero, this approximates to z ≈ r — the two are nearly identical numerically.
+
+```{r}
+#| label: fig-fisher-transform
+#| fig-cap: "Bootstrap distributions of raw Pearson r (left) and Fisher z-transformed values (right) by need dimension and group. The z-transformation yields approximately symmetric distributions, satisfying the normality assumption required for the z-test."
+#| echo: false
+#| fig-width: 10
+#| fig-height: 8
+
+fisher_viz_data <- do.call(rbind, lapply(rq3b_results, function(x) {
+  rbind(
+    data.frame(Need = x$need, Group = LABEL_AI, raw_r = x$boot_r_ai),
+    data.frame(Need = x$need, Group = LABEL_HU, raw_r = x$boot_r_hu)
+  )
+})) |>
+  mutate(
+    z_transformed = psych::fisherz(raw_r),
+    Need  = factor(Need,  levels = c(TABLE_LABEL_AUT, TABLE_LABEL_COM, TABLE_LABEL_REL)),
+    Group = factor(Group, levels = c(LABEL_AI, LABEL_HU))
+  )
+
+fig_fisher_transform <- fisher_viz_data |>
+  tidyr::pivot_longer(cols = c(raw_r, z_transformed),
+                      names_to = "Transformation", values_to = "value") |>
+  mutate(Transformation = factor(Transformation,
+    levels = c("raw_r", "z_transformed"),
+    labels = c("Raw Pearson r", "Fisher z-transformed"))) |>
+  ggplot(aes(x = value, fill = Group)) +
+  geom_histogram(bins = 30, alpha = 0.6, position = "identity") +
+  facet_grid(Need ~ Transformation, scales = "free_x") +
+  scale_fill_manual(values = setNames(c(COL_AI_LINE, COL_HU_LINE), c(LABEL_AI, LABEL_HU))) +
+  labs(
+    title    = "Bootstrap Distribution: Raw Pearson r vs. Fisher z-Transformed",
+    subtitle = paste0("R = ", BOOTSTRAP_SAMPLES, " bootstrap resamples per group × need"),
+    x = "Value", y = "Frequency", fill = LABEL_SAMPLE,
+    caption  = paste0(
+      "Left: raw r — bounded [−1,1], right-skewed near ±1. ",
+      "Right: Fisher z = 0.5 × ln((1+r)/(1−r)) — approximately symmetric. ",
+      "Symmetry enables the z-test in psych::r.test()."
+    )
+  ) +
+  theme_classic(base_family = THESIS_FONT, base_size = THESIS_FONTSIZE) +
+  theme(strip.background = element_blank(), strip.text = element_text(face = "bold"))
+
+fig_fisher_transform
+```
+
+### 8.4 Pearson vs Spearman check
+
+```{r}
+#| label: tbl-rq3b-pearson-spearman
+#| tbl-cap: "Pearson r and Spearman ρ Between LLM Scores and Questionnaire Scores by Need Dimension and Group (RQ3b)"
+#| echo: false
+
+tbl_rq3b_pearson_spearman <- dplyr::bind_rows(lapply(rq3b_results, function(x) {
+  data.frame(
+    Need                 = x$need,
+    `r (AI) [95% CI]`    = sprintf("%.2f [%.2f, %.2f]", x$r_ai, x$r_ai_ci_lo, x$r_ai_ci_hi),
+    `ρ (AI)`             = round(x$rho_ai, 2),
+    `r (Human) [95% CI]` = sprintf("%.2f [%.2f, %.2f]", x$r_hu, x$r_hu_ci_lo, x$r_hu_ci_hi),
+    `ρ (Human)`          = round(x$rho_hu, 2),
+    check.names = FALSE
+  )
+})) |>
+  flextable() |>
+  style_apa7() |>
+  add_apa_note(paste0(
+    "r = Pearson correlation; ρ = Spearman (robustness check). ",
+    "CIs: 95% bootstrap percentile (R = ", BOOTSTRAP_SAMPLES, "). ",
+    LABEL_AI, " N = ", nrow(d_grp_ai), "; ", LABEL_HU, " N = ", nrow(d_grp_human), ". "
+  ))
+
+tbl_rq3b_pearson_spearman
+```
+
+## 8.5 Visualisation
+
+### 8.5.1 Correlations per group
+
+
+```{r}
+#| label: fig-rq3b-corr-CI
+#| echo: false
+#| fig-cap: "Pearson r between LLM scores and questionnaire scores by need dimension and group (RQ3b). Shaded bands and error bars = 95% bootstrap CIs."
+#| fig-width: 6
+#| fig-height: 4
+#| fig-dpi: 500
+
+# geom_ribbon requires a continuous x; manually apply dodge offset so ribbons
+# don't overlap (position_dodge has no effect on geom_ribbon).
+DODGE_W <- 0.1
+
+fig_rq3b_corr_ci_data <- dplyr::bind_rows(lapply(rq3b_results, function(x) {
+  rbind(
+    data.frame(need = x$need, group = LABEL_AI, r = x$r_ai,
+               ci_lo = x$r_ai_ci_lo, ci_hi = x$r_ai_ci_hi, stringsAsFactors = FALSE),
+    data.frame(need = x$need, group = LABEL_HU, r = x$r_hu,
+               ci_lo = x$r_hu_ci_lo, ci_hi = x$r_hu_ci_hi, stringsAsFactors = FALSE)
+  )
+})) |>
+  dplyr::mutate(
+    need  = factor(need,  levels = c(TABLE_LABEL_AUT, TABLE_LABEL_COM, TABLE_LABEL_REL)),
+    group = factor(group, levels = c(LABEL_HU, LABEL_AI)),
+    x     = as.numeric(need) + ifelse(group == LABEL_HU, -DODGE_W, DODGE_W)
+  )
+
+rq3b_group_colors_ci <- c(
+  setNames(COL_AI_SHADES[1], LABEL_AI),
+  setNames(COL_HU_SHADES[1], LABEL_HU)
+)
+
+BRACKET_X  <- 0     # arm centered between the two dodged points (DODGE_W = 0.1)
+TICK_W     <- 0.10  # horizontal tick half-width
+
+bracket_data <- dplyr::bind_rows(lapply(rq3b_results, function(x) {
+  need_num <- which(c(TABLE_LABEL_AUT, TABLE_LABEL_COM, TABLE_LABEL_REL) == x$need)
+  data.frame(
+    need_num = need_num,
+    r_ai     = x$r_ai,
+    r_hu     = x$r_hu,
+    delta_r  = x$r_ai - x$r_hu,
+    x_arm    = need_num + BRACKET_X,
+    stringsAsFactors = FALSE
+  )
+}))
+
+fig_rq3b_corr_CI <- ggplot(fig_rq3b_corr_ci_data,
+    aes(x = x, y = r, color = group, fill = group, group = group)) +
+  geom_hline(yintercept = 0, linetype = "dashed", linewidth = 0.5, color = "grey60") +
+  geom_errorbar(aes(ymin = ci_lo, ymax = ci_hi), width = 0, linewidth = 0.8) +
+  geom_point(shape = 21, fill = "white", size = 1.5, stroke = 1.8) +
+  # bracket: vertical arm
+  geom_segment(data = bracket_data,
+    aes(x = x_arm, xend = x_arm, y = r_hu, yend = r_ai),
+    color = COL_DIFF, linewidth = 0.25, inherit.aes = FALSE) +
+  # bracket: top tick
+  geom_segment(data = bracket_data,
+    aes(x = x_arm - TICK_W, xend = x_arm + TICK_W, y = r_ai, yend = r_ai),
+    color = COL_DIFF, linewidth = 0.25, inherit.aes = FALSE) +
+  # bracket: bottom tick
+  geom_segment(data = bracket_data,
+    aes(x = x_arm - TICK_W, xend = x_arm + TICK_W, y = r_hu, yend = r_hu),
+    color = COL_DIFF, linewidth = 0.25, inherit.aes = FALSE) +
+  scale_x_continuous(
+    breaks   = seq_along(levels(fig_rq3b_corr_ci_data$need)),
+    labels   = levels(fig_rq3b_corr_ci_data$need),
+    limits   = c(0.6, 3.6),
+    position = "top"
+  ) +
+  scale_color_manual(values = rq3b_group_colors_ci, name = NULL) +
+  scale_fill_manual(values  = rq3b_group_colors_ci, name = NULL) +
+  labs(x = NULL, y = "Pearson r") +
+  theme_minimal(base_size = THESIS_FONTSIZE) +
+  theme(
+    text               = element_text(family = THESIS_FONT),
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor.x = element_blank(),
+    axis.text.x.top    = element_text(colour = "black"),
+    panel.grid.major.y = element_line(linewidth = 0.3),
+    panel.grid.minor.y = element_line(linewidth = 0.3),
+    axis.title.y         = element_text(margin = margin(r = 12)),
+    legend.position      = c(0.18, 0.15),
+    legend.direction     = "horizontal",
+    legend.margin        = margin(t = 4),
+    legend.background    = element_rect(fill = "white", color = NA),
+    legend.key           = element_blank(),
+    legend.title         = element_text(face = "plain")
+  )
+
+fig_rq3b_corr_CI
+
+```
+
+*Note.* Shaded bands and error bars = 95% bootstrap CIs (R = `r BOOTSTRAP_SAMPLES`). AI surrogates N = `r nrow(d_grp_ai)`; Humans N = `r nrow(d_grp_human)`.
+
+```{r}
+#| label: fig-rq3b-corr-CI-rect
+#| echo: false
+#| fig-cap: "Pearson r between LLM scores and questionnaire scores by need dimension and group (RQ3b). Error bars = 95% bootstrap CIs. Shaded rectangles = difference between point estimates (Δr)."
+#| fig-width: 6
+#| fig-height: 4
+#| fig-dpi: 500
+
+DODGE_W    <- 0.1
+RECT_HALF_W <- 0.04  # narrower than dodge offset; avoids overlap with CI bars
+
+fig_rq3b_corr_ci_rect_data <- fig_rq3b_corr_ci_data  # reuse data built above
+
+fig_rq3b_corr_CI_rect <- ggplot(fig_rq3b_corr_ci_rect_data,
+    aes(x = x, y = r, color = group, fill = group, group = group)) +
+  geom_hline(yintercept = 0, linetype = "dashed", linewidth = 0.5, color = "grey60") +
+  # shaded rectangle spanning the gap between the two point estimates
+  geom_rect(data = bracket_data,
+    aes(xmin = x_arm - RECT_HALF_W, xmax = x_arm + RECT_HALF_W,
+        ymin = pmin(r_hu, r_ai),     ymax = pmax(r_hu, r_ai)),
+    fill = COL_DIFF, alpha = 0.45, color = NA,
+    inherit.aes = FALSE) +
+  geom_errorbar(aes(ymin = ci_lo, ymax = ci_hi), width = 0, linewidth = 0.8) +
+  geom_point(shape = 21, fill = "white", size = 1.5, stroke = 1.8) +
+  scale_x_continuous(
+    breaks   = seq_along(levels(fig_rq3b_corr_ci_rect_data$need)),
+    labels   = levels(fig_rq3b_corr_ci_rect_data$need),
+    limits   = c(0.6, 3.6),
+    position = "top"
+  ) +
+  scale_color_manual(values = rq3b_group_colors_ci, name = NULL) +
+  scale_fill_manual(values  = rq3b_group_colors_ci, name = NULL) +
+  labs(x = NULL, y = "Pearson r") +
+  theme_minimal(base_size = THESIS_FONTSIZE) +
+  theme(
+    text               = element_text(family = THESIS_FONT),
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor.x = element_blank(),
+    axis.text.x.top    = element_text(colour = "black"),
+    panel.grid.major.y = element_line(linewidth = 0.3),
+    panel.grid.minor.y = element_line(linewidth = 0.3),
+    axis.title.y         = element_text(margin = margin(r = 12)),
+    legend.position      = c(0.18, 0.15),
+    legend.direction     = "horizontal",
+    legend.margin        = margin(t = 4),
+    legend.background    = element_rect(fill = "white", color = NA),
+    legend.key           = element_blank(),
+    legend.title         = element_text(face = "plain")
+  )
+
+fig_rq3b_corr_CI_rect
+
+```
+
+*Note.* Error bars = 95% bootstrap CIs (R = `r BOOTSTRAP_SAMPLES`). Shaded rectangles = difference between point estimates (Δr = r_AI − r_Human). AI surrogates N = `r nrow(d_grp_ai)`; Humans N = `r nrow(d_grp_human)`.
+
+### 8.5.2 Δr from Fisher's z-difference test
+
+```{r}
+#| label: fig-rq3b-delta
+#| echo: false
+#| fig-cap: "Δr (r_AI − r_Human) per need dimension with 95% bootstrap CIs (RQ3b). Dashed line = 0 (no group difference). Points above zero indicate stronger LLM–questionnaire correspondence in AI surrogates than humans."
+#| fig-width: 5
+#| fig-height: 4
+#| fig-dpi: 300
+
+fig_rq3b_delta_data <- rq3b_fisher_df |>
+  dplyr::mutate(need = factor(need, levels = c(TABLE_LABEL_AUT, TABLE_LABEL_COM, TABLE_LABEL_REL)))
+
+fig_rq3b_delta <- ggplot(fig_rq3b_delta_data,
+    aes(x = need, y = delta_r)) +
+  geom_hline(yintercept = 0, linetype = "dashed", linewidth = 0.4, color = "grey50") +
+  geom_errorbar(aes(ymin = delta_ci_lo, ymax = delta_ci_hi),
+                width = 0, linewidth = 0.8, color = COL_DIFF) +
+  geom_point(shape = 21, fill = "white", size = 1.5, stroke = 1.8,
+             color = COL_DIFF) +
+  scale_x_discrete(position = "top") +
+  labs(x = NULL, y = expression(Delta*italic(r) ~ "(AI \u2212 Human)")) +
+  theme_minimal(base_size = THESIS_FONTSIZE) +
+  theme(
+    text               = element_text(family = THESIS_FONT),
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor.x = element_blank(),
+    axis.text.x.top    = element_text(colour = "black"),
+    panel.grid.major.y = element_line(linewidth = 0.3),
+    panel.grid.minor.y = element_line(linewidth = 0.3),
+    axis.title.y       = element_text(margin = margin(r = 12))
+  )
+
+fig_rq3b_delta
+
+```
+
+*Note.* Δr = r(AI surrogates) − r(Humans). Error bars = 95% bootstrap CIs for Δr (R = `r BOOTSTRAP_SAMPLES`, stratified by group). Z and p from Fisher's z-difference test; see @tbl-rq3b-fisher-zdiff.
+
+
+# 9 Sensitivity: Equal-Width Binning of LLM Scores
+
+LLM score means are continuous averages of three repeated scorings on a 1–5 integer scale. This section applies equal-width binning by rounding each mean to the nearest integer ($3.1 \to 3$, $3.6 \to 4$), collapsing the continuous distribution back onto the five integer bins. Correlations between binned LLM scores and questionnaire scores are then recomputed for both groups and compared to the unrounded results in @tbl-rq3b-fisher-zdiff. All code is self-contained and does not modify any upstream objects.
+
+## 9.1 Histogram of Rounded LLM Scores
+
+```{r}
+#| label: fig-hist-llm-rounded
+#| fig-cap: "Frequency distributions of LLM scores after rounding to the nearest integer (equal-width binning, bin width = 1), by need dimension and sample group. Vertical lines indicate group means of the rounded scores. Compare with the unrounded distributions in @fig-hist."
+#| echo: false
+#| fig-width: 10
+#| fig-height: 5
+#| fig-dpi: 300
+
+# Derived locally — does not overwrite d or any upstream object
+d_rounded <- d |>
+  mutate(
+    llm_aut_round = round(llm_aut_mean),
+    llm_com_round = round(llm_com_mean),
+    llm_rel_round = round(llm_rel_mean)
+  )
+
+d_rounded_long <- d_rounded |>
+  pivot_longer(
+    cols      = c(llm_aut_round, llm_com_round, llm_rel_round),
+    names_to  = "variable",
+    values_to = "score"
+  ) |>
+  mutate(
+    Need  = factor(case_when(
+      variable == "llm_aut_round" ~ TABLE_LABEL_AUT,
+      variable == "llm_com_round" ~ TABLE_LABEL_COM,
+      variable == "llm_rel_round" ~ TABLE_LABEL_REL
+    ), levels = c(TABLE_LABEL_AUT, TABLE_LABEL_COM, TABLE_LABEL_REL)),
+    Group = factor(c(AI = LABEL_AI, HU = LABEL_HU)[as.character(id_type)],
+                   levels = c(LABEL_AI, LABEL_HU))
+  )
+
+means_rounded <- d_rounded_long |>
+  group_by(Group, Need) |>
+  summarise(M = mean(score, na.rm = TRUE), .groups = "drop")
+
+d_rounded_long |>
+  ggplot(aes(x = score, fill = Group)) +
+  geom_histogram(binwidth = 1, boundary = 0.5, position = "dodge",
+                 alpha = 0.85, color = "white") +
+  geom_vline(data = means_rounded,
+             aes(xintercept = M, color = Group, linetype = Group),
+             linewidth = 0.8) +
+  facet_wrap(~ Need, nrow = 1) +
+  scale_fill_manual(values  = setNames(c(COL_AI_LINE, COL_HU_LINE), c(LABEL_AI, LABEL_HU))) +
+  scale_color_manual(values = setNames(c(COL_AI_LINE, COL_HU_LINE), c(LABEL_AI, LABEL_HU))) +
+  scale_x_continuous(breaks = 1:5, limits = c(0.5, 5.5)) +
+  labs(x = "Rounded LLM Score (1–5)", y = "Count",
+       fill = LABEL_SAMPLE, color = "Group (mean)", linetype = "Group (mean)") +
+  theme_classic(base_family = THESIS_FONT, base_size = THESIS_FONTSIZE) +
+  theme(strip.background = element_blank(), strip.text = element_text(face = "bold"))
+
+```
+
+## 9.2 Correlations with Rounded LLM Scores
+
+```{r}
+#| label: tbl-corr-rounded
+#| tbl-cap: "Pearson Correlations Between Rounded LLM Scores and Questionnaire Scores by Need Dimension and Group (Equal-Width Binning Sensitivity Check)"
+#| echo: false
+
+corr_rounded_ai <- d_rounded |> dplyr::filter(id_type == "AI") |>
+  dplyr::summarise(
+    !!TABLE_LABEL_AUT := round(cor(llm_aut_round, q_aut_mean, use = "complete.obs"), 2),
+    !!TABLE_LABEL_COM := round(cor(llm_com_round, q_com_mean, use = "complete.obs"), 2),
+    !!TABLE_LABEL_REL := round(cor(llm_rel_round, q_rel_mean, use = "complete.obs"), 2)
+  )
+
+corr_rounded_hu <- d_rounded |> dplyr::filter(id_type == "HU") |>
+  dplyr::summarise(
+    !!TABLE_LABEL_AUT := round(cor(llm_aut_round, q_aut_mean, use = "complete.obs"), 2),
+    !!TABLE_LABEL_COM := round(cor(llm_com_round, q_com_mean, use = "complete.obs"), 2),
+    !!TABLE_LABEL_REL := round(cor(llm_rel_round, q_rel_mean, use = "complete.obs"), 2)
+  )
+
+# Pull unrounded r values from rq3b_results for comparison
+r_unrounded_ai <- sapply(rq3b_results, `[[`, "r_ai")
+r_unrounded_hu <- sapply(rq3b_results, `[[`, "r_hu")
+
+tibble::tibble(
+  Need         = c(TABLE_LABEL_AUT, TABLE_LABEL_COM, TABLE_LABEL_REL),
+  !!LABEL_HU  := c(corr_rounded_hu[[TABLE_LABEL_AUT]],
+                    corr_rounded_hu[[TABLE_LABEL_COM]],
+                    corr_rounded_hu[[TABLE_LABEL_REL]]),
+  `Δr (HU)`   = round(c(corr_rounded_hu[[TABLE_LABEL_AUT]],
+                          corr_rounded_hu[[TABLE_LABEL_COM]],
+                          corr_rounded_hu[[TABLE_LABEL_REL]]) - r_unrounded_hu, 2),
+  !!LABEL_AI  := c(corr_rounded_ai[[TABLE_LABEL_AUT]],
+                    corr_rounded_ai[[TABLE_LABEL_COM]],
+                    corr_rounded_ai[[TABLE_LABEL_REL]]),
+  `Δr (AI)`   = round(c(corr_rounded_ai[[TABLE_LABEL_AUT]],
+                          corr_rounded_ai[[TABLE_LABEL_COM]],
+                          corr_rounded_ai[[TABLE_LABEL_REL]]) - r_unrounded_ai, 2)
+) |>
+  flextable() |>
+  style_apa7() |>
+  set_header_labels(
+    `Δr (HU)` = "Δr",
+    `Δr (AI)` = "Δr"
+  ) |>
+  add_header_row(
+    values    = c("", LABEL_HU, LABEL_AI),
+    colwidths = c(1L, 2L, 2L)
+  ) |>
+  add_apa_note(paste0(
+    "LLM scores rounded to the nearest integer before correlation (e.g., 3.1 → 3, 3.6 → 4). ",
+    "Questionnaire scores are unmodified means. ",
+    "Δr = r(rounded) − r(unrounded); reference values from @tbl-rq3b-fisher-zdiff. ",
+    LABEL_AI, " N = ", nrow(d_grp_ai), "; ",
+    LABEL_HU, " N = ", nrow(d_grp_human), "."
+  ))
+```
+
+
+## 9.3 Histogram of Rounded Questionnaire Scores
+
+```{r}
+#| label: fig-hist-q-rounded
+#| fig-cap: "Frequency distributions of questionnaire scores after rounding composite means to the nearest integer (equal-width binning, bin width = 1), by need dimension and sample group. Vertical lines indicate group means of the rounded scores. Compare with the unrounded distributions in @fig-hist."
+#| echo: false
+#| fig-width: 10
+#| fig-height: 5
+
+d_q_rounded <- d |>
+  mutate(
+    llm_aut_round = round(llm_aut_mean),
+    llm_com_round = round(llm_com_mean),
+    llm_rel_round = round(llm_rel_mean),
+    q_aut_round   = round(q_aut_mean),
+    q_com_round   = round(q_com_mean),
+    q_rel_round   = round(q_rel_mean)
+  )
+
+d_q_rounded_long <- d_q_rounded |>
+  pivot_longer(
+    cols      = c(q_aut_round, q_com_round, q_rel_round),
+    names_to  = "variable",
+    values_to = "score"
+  ) |>
+  mutate(
+    Need  = factor(case_when(
+      variable == "q_aut_round" ~ TABLE_LABEL_AUT,
+      variable == "q_com_round" ~ TABLE_LABEL_COM,
+      variable == "q_rel_round" ~ TABLE_LABEL_REL
+    ), levels = c(TABLE_LABEL_AUT, TABLE_LABEL_COM, TABLE_LABEL_REL)),
+    Group = factor(c(AI = LABEL_AI, HU = LABEL_HU)[as.character(id_type)],
+                   levels = c(LABEL_AI, LABEL_HU))
+  )
+
+means_q_rounded <- d_q_rounded_long |>
+  group_by(Group, Need) |>
+  summarise(M = mean(score, na.rm = TRUE), .groups = "drop")
+
+d_q_rounded_long |>
+  ggplot(aes(x = score, fill = Group)) +
+  geom_histogram(binwidth = 1, boundary = 0.5, position = "dodge",
+                 alpha = 0.85, color = "white") +
+  geom_vline(data = means_q_rounded,
+             aes(xintercept = M, color = Group, linetype = Group),
+             linewidth = 0.8) +
+  facet_wrap(~ Need, nrow = 1) +
+  scale_fill_manual(values  = setNames(c(COL_AI_LINE, COL_HU_LINE), c(LABEL_AI, LABEL_HU))) +
+  scale_color_manual(values = setNames(c(COL_AI_LINE, COL_HU_LINE), c(LABEL_AI, LABEL_HU))) +
+  scale_x_continuous(breaks = 1:5, limits = c(0.5, 5.5)) +
+  labs(x = "Rounded Questionnaire Score (1–5)", y = "Count",
+       fill = LABEL_SAMPLE, color = "Group (mean)", linetype = "Group (mean)") +
+  theme_classic(base_family = THESIS_FONT, base_size = THESIS_FONTSIZE) +
+  theme(strip.background = element_blank(), strip.text = element_text(face = "bold"))
+
+```
+
+## 9.4 Correlations: Rounded LLM Scores × Rounded Questionnaire Scores
+
+```{r}
+#| label: tbl-corr-q-rounded
+#| tbl-cap: "Pearson Correlations Between Rounded LLM Scores and Rounded Questionnaire Scores by Need Dimension and Group (Both Variables Binned — Equal-Width Sensitivity Check)"
+#| echo: false
+
+corr_q_rounded_ai <- d_q_rounded |> dplyr::filter(id_type == "AI") |>
+  dplyr::summarise(
+    !!TABLE_LABEL_AUT := round(cor(llm_aut_round, q_aut_round, use = "complete.obs"), 2),
+    !!TABLE_LABEL_COM := round(cor(llm_com_round, q_com_round, use = "complete.obs"), 2),
+    !!TABLE_LABEL_REL := round(cor(llm_rel_round, q_rel_round, use = "complete.obs"), 2)
+  )
+
+corr_q_rounded_hu <- d_q_rounded |> dplyr::filter(id_type == "HU") |>
+  dplyr::summarise(
+    !!TABLE_LABEL_AUT := round(cor(llm_aut_round, q_aut_round, use = "complete.obs"), 2),
+    !!TABLE_LABEL_COM := round(cor(llm_com_round, q_com_round, use = "complete.obs"), 2),
+    !!TABLE_LABEL_REL := round(cor(llm_rel_round, q_rel_round, use = "complete.obs"), 2)
+  )
+
+r_unrounded_ai <- sapply(rq3b_results, `[[`, "r_ai")
+r_unrounded_hu <- sapply(rq3b_results, `[[`, "r_hu")
+
+tibble::tibble(
+  Need         = c(TABLE_LABEL_AUT, TABLE_LABEL_COM, TABLE_LABEL_REL),
+  !!LABEL_HU  := c(corr_q_rounded_hu[[TABLE_LABEL_AUT]],
+                    corr_q_rounded_hu[[TABLE_LABEL_COM]],
+                    corr_q_rounded_hu[[TABLE_LABEL_REL]]),
+  `Δr (HU)`   = round(c(corr_q_rounded_hu[[TABLE_LABEL_AUT]],
+                          corr_q_rounded_hu[[TABLE_LABEL_COM]],
+                          corr_q_rounded_hu[[TABLE_LABEL_REL]]) - r_unrounded_hu, 2),
+  !!LABEL_AI  := c(corr_q_rounded_ai[[TABLE_LABEL_AUT]],
+                    corr_q_rounded_ai[[TABLE_LABEL_COM]],
+                    corr_q_rounded_ai[[TABLE_LABEL_REL]]),
+  `Δr (AI)`   = round(c(corr_q_rounded_ai[[TABLE_LABEL_AUT]],
+                          corr_q_rounded_ai[[TABLE_LABEL_COM]],
+                          corr_q_rounded_ai[[TABLE_LABEL_REL]]) - r_unrounded_ai, 2)
+) |>
+  flextable() |>
+  style_apa7() |>
+  set_header_labels(
+    `Δr (HU)` = "Δr",
+    `Δr (AI)` = "Δr"
+  ) |>
+  add_header_row(
+    values    = c("", LABEL_HU, LABEL_AI),
+    colwidths = c(1L, 2L, 2L)
+  ) |>
+  add_apa_note(paste0(
+    "Both LLM scores and questionnaire scores rounded to the nearest integer before correlation (e.g., 3.1 → 3, 3.6 → 4). ",
+    "Δr = r(both rounded) − r(unrounded); reference values from @tbl-rq3b-fisher-zdiff. ",
+    LABEL_AI, " N = ", nrow(d_grp_ai), "; ",
+    LABEL_HU, " N = ", nrow(d_grp_human), "."
+  ))
+```
+
+## 9.5 Competence Cross-Tabulation (Rounded LLM × Rounded Questionnaire)
+
+```{r}
+#| label: tbl-comp-crosstab-ai
+#| tbl-cap: "Cross-Tabulation of Rounded LLM Competence and Rounded Questionnaire Competence — AI Surrogates"
+#| echo: false
+
+ct_ai_df <- with(
+  dplyr::filter(d_q_rounded, id_type == "AI"),
+  table(
+    `LLM Competence` = factor(llm_com_round, levels = 1:5),
+    `Q Competence`   = factor(q_com_round,   levels = 1:5)
+  )
+) |> as.data.frame.matrix()
+ct_ai_df <- cbind(LLM = rownames(ct_ai_df), ct_ai_df)
+
+ct_ai_df |>
+  flextable() |>
+  style_apa7() |>
+  set_header_labels(LLM = "LLM Competence (rounded)") |>
+  add_header_row(values = c("", "Questionnaire Competence (rounded)"), colwidths = c(1L, 5L)) |>
+  add_apa_note(paste0(
+    "Rows = rounded LLM Competence (1–5); columns = rounded questionnaire Competence (1–5). ",
+    "Cell entries are counts. ",
+    LABEL_AI, " N = ", sum(d_q_rounded$id_type == "AI"), "."
+  ))
+```
+
+```{r}
+#| label: tbl-comp-crosstab-hu
+#| tbl-cap: "Cross-Tabulation of Rounded LLM Competence and Rounded Questionnaire Competence — Human Participants"
+#| echo: false
+
+ct_hu_df <- with(
+  dplyr::filter(d_q_rounded, id_type == "HU"),
+  table(
+    `LLM Competence` = factor(llm_com_round, levels = 1:5),
+    `Q Competence`   = factor(q_com_round,   levels = 1:5)
+  )
+) |> as.data.frame.matrix()
+ct_hu_df <- cbind(LLM = rownames(ct_hu_df), ct_hu_df)
+
+ct_hu_df |>
+  flextable() |>
+  style_apa7() |>
+  set_header_labels(LLM = "LLM Competence (rounded)") |>
+  add_header_row(values = c("", "Questionnaire Competence (rounded)"), colwidths = c(1L, 5L)) |>
+  add_apa_note(paste0(
+    "Rows = rounded LLM Competence (1–5); columns = rounded questionnaire Competence (1–5). ",
+    "Cell entries are counts. ",
+    LABEL_HU, " N = ", sum(d_q_rounded$id_type == "HU"), "."
+  ))
+```
+
+```{r}
+#| label: sec9q-cleanup
+#| include: false
+
+```
+
+# 10 Sensitivity: Polychoric Correlations on Rounded Scores
+
+Polychoric correlation treats both variables as ordinal (discretized underlying
+latent continua), which is more appropriate than Pearson r when scores are
+rounded integers on a 1–5 scale. Both LLM and questionnaire scores are rounded
+to the nearest integer (same rounding as Section 9) before computing polychoric
+r. The 95% CIs are bootstrap percentile (R = 1,000; polychoric is computationally
+heavier than Pearson so a smaller B is used here). Δr shows the difference from
+the unrounded Pearson r in @tbl-rq3b-fisher-zdiff.
+
+```{r}
+#| label: sec10-polychoric
+#| include: false
+#| warning: false
+#| message: false
+
+set.seed(2026)
+d_poly <- d |>
+  mutate(
+    llm_aut_round = round(llm_aut_mean),
+    llm_com_round = round(llm_com_mean),
+    llm_rel_round = round(llm_rel_mean),
+    q_aut_round   = round(q_aut_mean),
+    q_com_round   = round(q_com_mean),
+    q_rel_round   = round(q_rel_mean)
+  )
+
+llm_round_cols <- c(
+  Autonomy    = "llm_aut_round",
+  Competence  = "llm_com_round",
+  Relatedness = "llm_rel_round"
+)
+q_round_cols <- c(
+  Autonomy    = "q_aut_round",
+  Competence  = "q_com_round",
+  Relatedness = "q_rel_round"
+)
+
+CI_Q_LO     <- (1 - CI_LEVEL) / 2       # = 0.025  lower quantile for bootstrap percentile CIs
+CI_Q_HI     <- 1 - (1 - CI_LEVEL) / 2  # = 0.975  upper quantile for bootstrap percentile CIs
+POLY_BOOT_R <- 1000  # polychoric is slower to fit; 1000 sufficient for a sensitivity check
+
+poly_boot_ci <- function(df, llm_col, q_col) {
+  r_hat   <- as.numeric(psych::polychoric(cbind(df[[llm_col]], df[[q_col]]))$rho[1, 2])
+  n       <- nrow(df)
+  boot_rs <- replicate(POLY_BOOT_R, {
+    db <- df[sample.int(n, replace = TRUE), ]
+    tryCatch(
+      as.numeric(psych::polychoric(cbind(db[[llm_col]], db[[q_col]]))$rho[1, 2]),
+      error = function(e) NA_real_
+    )
+  })
+  boot_rs <- boot_rs[!is.na(boot_rs)]
+  list(r     = r_hat,
+       ci_lo = unname(quantile(boot_rs, CI_Q_LO)),
+       ci_hi = unname(quantile(boot_rs, CI_Q_HI)))
+}
+
+r_pearson_ai <- sapply(rq3b_results, `[[`, "r_ai")
+r_pearson_hu <- sapply(rq3b_results, `[[`, "r_hu")
+
+poly_tbl <- dplyr::bind_rows(lapply(seq_along(names(llm_round_cols)), function(i) {
+  need <- names(llm_round_cols)[[i]]
+  ai   <- poly_boot_ci(dplyr::filter(d_poly, id_type == "AI"),
+                       llm_round_cols[[need]], q_round_cols[[need]])
+  hu   <- poly_boot_ci(dplyr::filter(d_poly, id_type == "HU"),
+                       llm_round_cols[[need]], q_round_cols[[need]])
+  data.frame(
+    Need      = need,
+    r_poly_hu = sprintf("%.2f [%.2f, %.2f]", hu$r, hu$ci_lo, hu$ci_hi),
+    delta_hu  = round(hu$r - r_pearson_hu[[i]], 2),
+    r_poly_ai = sprintf("%.2f [%.2f, %.2f]", ai$r, ai$ci_lo, ai$ci_hi),
+    delta_ai  = round(ai$r - r_pearson_ai[[i]], 2),
+    stringsAsFactors = FALSE
+  )
+}))
+```
+
+```{r}
+#| label: tbl-polychoric
+#| tbl-cap: "Polychoric Correlations Between Rounded LLM and Questionnaire Scores by Need Dimension and Group (Ordinal Sensitivity Check)"
+#| echo: false
+
+poly_tbl |>
+  flextable() |>
+  style_apa7() |>
+  set_header_labels(
+    Need      = LABEL_NEEDS,
+    r_poly_hu = "r_poly [95% CI]",
+    delta_hu  = "Δr",
+    r_poly_ai = "r_poly [95% CI]",
+    delta_ai  = "Δr"
+  ) |>
+  add_header_row(
+    values    = c("", LABEL_HU, LABEL_AI),
+    colwidths = c(1L, 2L, 2L)
+  ) |>
+  add_apa_note(paste0(
+    "Polychoric correlation between LLM score and questionnaire score, ",
+    "both rounded to the nearest integer (same rounding as Section 9). ",
+    "95% CIs: bootstrap percentile (R = ", POLY_BOOT_R, "). ",
+    "Δr = r_poly − r_Pearson (unrounded, from @tbl-rq3b-fisher-zdiff). ",
+    LABEL_AI, " N = ", nrow(d_grp_ai), "; ", LABEL_HU, " N = ", nrow(d_grp_human), "."
+  ))
+```
+
+
+# 11 Summary: Pearson, Spearman, and Polychoric Correlations
+
+```{r}
+#| label: sec11-compute
+#| include: false
+#| warning: false
+#| message: false
+
+set.seed(2026)
+# d_poly, llm_round_cols, q_round_cols, poly_boot_ci, POLY_BOOT_R reused from section 10
+
+boot_fn_rho <- function(data, i) cor(data$llm[i], data$q[i], method = "spearman")
+fmt_ci      <- function(r, lo, hi) sprintf("%.2f [%.2f, %.2f]", r, lo, hi)
+
+# Run all bootstraps once; store raw values for both the table and the plot
+method_results <- lapply(seq_along(rq3b_results), function(i) {
+  res     <- rq3b_results[[i]]
+  need    <- res$need
+  llm_col <- need_cols[[need]]
+  q_col   <- q_cols[[need]]
+
+  boot_rho_ai <- boot::boot(data.frame(llm = d_grp_ai[[llm_col]],    q = d_grp_ai[[q_col]]),    boot_fn_rho, R = BOOTSTRAP_SAMPLES)
+  boot_rho_hu <- boot::boot(data.frame(llm = d_grp_human[[llm_col]], q = d_grp_human[[q_col]]), boot_fn_rho, R = BOOTSTRAP_SAMPLES)
+  ci_rho_ai   <- boot::boot.ci(boot_rho_ai, type = "perc")
+  ci_rho_hu   <- boot::boot.ci(boot_rho_hu, type = "perc")
+
+  poly_ai <- poly_boot_ci(dplyr::filter(d_poly, id_type == "AI"), llm_round_cols[[need]], q_round_cols[[need]])
+  poly_hu <- poly_boot_ci(dplyr::filter(d_poly, id_type == "HU"), llm_round_cols[[need]], q_round_cols[[need]])
+
+  list(
+    need        = need,
+    r_hu        = res$r_hu,    r_hu_lo  = res$r_hu_ci_lo,       r_hu_hi  = res$r_hu_ci_hi,
+    r_ai        = res$r_ai,    r_ai_lo  = res$r_ai_ci_lo,       r_ai_hi  = res$r_ai_ci_hi,
+    rho_hu      = res$rho_hu,  rho_hu_lo = ci_rho_hu$percent[4], rho_hu_hi = ci_rho_hu$percent[5],
+    rho_ai      = res$rho_ai,  rho_ai_lo = ci_rho_ai$percent[4], rho_ai_hi = ci_rho_ai$percent[5],
+    rpoly_hu    = poly_hu$r,   rpoly_hu_lo = poly_hu$ci_lo,      rpoly_hu_hi = poly_hu$ci_hi,
+    rpoly_ai    = poly_ai$r,   rpoly_ai_lo = poly_ai$ci_lo,      rpoly_ai_hi = poly_ai$ci_hi
+  )
+})
+
+method_tbl <- dplyr::bind_rows(lapply(method_results, function(x) {
+  data.frame(
+    Need        = x$need,
+    pearson_hu  = fmt_ci(x$r_hu,     x$r_hu_lo,     x$r_hu_hi),
+    spearman_hu = fmt_ci(x$rho_hu,   x$rho_hu_lo,   x$rho_hu_hi),
+    poly_hu     = fmt_ci(x$rpoly_hu, x$rpoly_hu_lo, x$rpoly_hu_hi),
+    pearson_ai  = fmt_ci(x$r_ai,     x$r_ai_lo,     x$r_ai_hi),
+    spearman_ai = fmt_ci(x$rho_ai,   x$rho_ai_lo,   x$rho_ai_hi),
+    poly_ai     = fmt_ci(x$rpoly_ai, x$rpoly_ai_lo, x$rpoly_ai_hi),
+    stringsAsFactors = FALSE
+  )
+}))
+
+need_levels <- c(TABLE_LABEL_AUT, TABLE_LABEL_COM, TABLE_LABEL_REL)
+
+method_plot_data <- dplyr::bind_rows(lapply(method_results, function(x) {
+  rbind(
+    data.frame(need=x$need, group=LABEL_HU, method="Pearson",    r=x$r_hu,     ci_lo=x$r_hu_lo,     ci_hi=x$r_hu_hi,     stringsAsFactors=FALSE),
+    data.frame(need=x$need, group=LABEL_AI, method="Pearson",    r=x$r_ai,     ci_lo=x$r_ai_lo,     ci_hi=x$r_ai_hi,     stringsAsFactors=FALSE),
+    data.frame(need=x$need, group=LABEL_HU, method="Spearman",   r=x$rho_hu,   ci_lo=x$rho_hu_lo,   ci_hi=x$rho_hu_hi,   stringsAsFactors=FALSE),
+    data.frame(need=x$need, group=LABEL_AI, method="Spearman",   r=x$rho_ai,   ci_lo=x$rho_ai_lo,   ci_hi=x$rho_ai_hi,   stringsAsFactors=FALSE),
+    data.frame(need=x$need, group=LABEL_HU, method="Polychoric", r=x$rpoly_hu, ci_lo=x$rpoly_hu_lo, ci_hi=x$rpoly_hu_hi, stringsAsFactors=FALSE),
+    data.frame(need=x$need, group=LABEL_AI, method="Polychoric", r=x$rpoly_ai, ci_lo=x$rpoly_ai_lo, ci_hi=x$rpoly_ai_hi, stringsAsFactors=FALSE)
+  )
+})) |>
+  dplyr::mutate(
+    need   = factor(need,   levels = need_levels),
+    group  = factor(group,  levels = c(LABEL_HU, LABEL_AI)),
+    method = factor(method, levels = c("Pearson", "Spearman", "Polychoric"))
+  )
+
+bracket_data_all <- dplyr::bind_rows(lapply(method_results, function(x) {
+  need_num <- which(need_levels == x$need)
+  rbind(
+    data.frame(need_num=need_num, method="Pearson",    r_hu=x$r_hu,     r_ai=x$r_ai,     stringsAsFactors=FALSE),
+    data.frame(need_num=need_num, method="Spearman",   r_hu=x$rho_hu,   r_ai=x$rho_ai,   stringsAsFactors=FALSE),
+    data.frame(need_num=need_num, method="Polychoric", r_hu=x$rpoly_hu, r_ai=x$rpoly_ai, stringsAsFactors=FALSE)
+  )
+})) |>
+  dplyr::mutate(method = factor(method, levels = c("Pearson", "Spearman", "Polychoric")))
+```
+
+```{r}
+#| label: tbl-method-comparison
+#| tbl-cap: "LLM–Questionnaire Correlations by Method, Need Dimension, and Group"
+#| echo: false
+
+method_tbl |>
+  flextable() |>
+  style_apa7() |>
+  set_header_labels(
+    Need        = LABEL_NEEDS,
+    pearson_hu  = "Pearson r",
+    spearman_hu = "Spearman ρ",
+    poly_hu     = "Polychoric r",
+    pearson_ai  = "Pearson r",
+    spearman_ai = "Spearman ρ",
+    poly_ai     = "Polychoric r"
+  ) |>
+  add_header_row(
+    values    = c("", LABEL_HU, LABEL_AI),
+    colwidths = c(1L, 3L, 3L)
+  ) |>
+  add_apa_note(paste0(
+    "All values shown as r [95% CI]. ",
+    "Pearson r and Spearman ρ computed on unrounded continuous scores; ",
+    "Pearson CIs: bootstrap percentile (R = ", BOOTSTRAP_SAMPLES, "); ",
+    "Spearman CIs: bootstrap percentile (R = ", BOOTSTRAP_SAMPLES, "). ",
+    "Polychoric r computed on rounded integer scores; ",
+    "CIs: bootstrap percentile (R = ", POLY_BOOT_R, "). ",
+    LABEL_AI, " N = ", nrow(d_grp_ai), "; ", LABEL_HU, " N = ", nrow(d_grp_human), "."
+  ))
+```
+
+```{r}
+#| label: fig-method-comparison
+#| fig-cap: "LLM–questionnaire correlations by method, need dimension, and group. Error bars = 95% bootstrap CIs. Yellow bracket = Δr (AI − Human). Pearson and Spearman on unrounded scores; Polychoric on rounded integer scores."
+#| echo: false
+#| fig-width: 10
+#| fig-height: 4
+#| fig-dpi: 500
+
+DODGE_W_11 <- 0.1
+TICK_W_11  <- 0.10
+
+fig11_data <- method_plot_data |>
+  dplyr::mutate(x = as.numeric(need) + ifelse(group == LABEL_HU, -DODGE_W_11, DODGE_W_11))
+
+group_colors_11 <- c(setNames(COL_AI_SHADES[1], LABEL_AI), setNames(COL_HU_SHADES[1], LABEL_HU))
+
+ggplot(fig11_data, aes(x = x, y = r, color = group, fill = group, group = group)) +
+  geom_hline(yintercept = 0, linetype = "dashed", linewidth = 0.5, color = "grey60") +
+  geom_errorbar(aes(ymin = ci_lo, ymax = ci_hi), width = 0, linewidth = 0.8) +
+  geom_point(shape = 21, fill = "white", size = 1.5, stroke = 1.8) +
+  geom_segment(data = bracket_data_all,
+    aes(x = need_num, xend = need_num, y = r_hu, yend = r_ai),
+    color = COL_DIFF, linewidth = 0.25, inherit.aes = FALSE) +
+  geom_segment(data = bracket_data_all,
+    aes(x = need_num - TICK_W_11, xend = need_num + TICK_W_11, y = r_ai, yend = r_ai),
+    color = COL_DIFF, linewidth = 0.25, inherit.aes = FALSE) +
+  geom_segment(data = bracket_data_all,
+    aes(x = need_num - TICK_W_11, xend = need_num + TICK_W_11, y = r_hu, yend = r_hu),
+    color = COL_DIFF, linewidth = 0.25, inherit.aes = FALSE) +
+  scale_x_continuous(
+    breaks   = 1:3,
+    labels   = need_levels,
+    limits   = c(0.6, 3.6),
+    position = "top"
+  ) +
+  scale_color_manual(values = group_colors_11, name = NULL) +
+  scale_fill_manual(values  = group_colors_11, name = NULL) +
+  facet_wrap(~ method, nrow = 1) +
+  labs(x = NULL, y = "Correlation") +
+  theme_minimal(base_size = THESIS_FONTSIZE) +
+  theme(
+    text                 = element_text(family = THESIS_FONT),
+    panel.grid.major.x   = element_blank(),
+    panel.grid.minor.x   = element_blank(),
+    axis.text.x.top      = element_text(colour = "black"),
+    panel.grid.major.y   = element_line(linewidth = 0.3),
+    panel.grid.minor.y   = element_line(linewidth = 0.3),
+    axis.title.y         = element_text(margin = margin(r = 12)),
+    strip.background     = element_blank(),
+    strip.text           = element_text(face = "bold"),
+    legend.position      = c(0.06, 0.18),
+    legend.direction     = "horizontal",
+    legend.margin        = margin(t = 4),
+    legend.background    = element_rect(fill = "white", color = NA),
+    legend.key           = element_blank()
+  )
+```
+
+*Note.* Error bars = 95% bootstrap CIs. Pearson and Spearman: R = `r BOOTSTRAP_SAMPLES`; Polychoric: R = `r POLY_BOOT_R`. AI surrogates N = `r nrow(d_grp_ai)`; Humans N = `r nrow(d_grp_human)`. Yellow bracket = Δr (AI − Human).
+
+```{r}
+#| label: sec11-cleanup
+#| include: false
+
+```
+
+# 12 Sensitivity: Actual Word Count as a Comparability Covariate
+
+The matched AI condition (three texts, ~150-word target) approximates the human sample's average total word count. However, human participants wrote Swedish texts with a wider and generally higher distribution of actual word counts compared to the tightly constrained English AI texts. If LLM scores are sensitive to raw text length, between-group differences in Sections 7 and 8 may partly reflect this mismatch.
+
+Two analyses address this. 
+
+First, word count distributions are visualised for both groups (expanding Section 3.6). 
+
+Second, within-group regressions of each LLM score on `actual_words` are reported separately per group and need dimension. If the slopes and R² values are near zero, word count does not appreciably drive LLM scores within either group, and the between-group comparison is not confounded by the word count gap. Third, partial correlations for RQ3b partial out `actual_words` before assessing LLM–questionnaire correspondence.
+
+## 12.1 Word Count Distributions by Group
+
+```{r}
+#| label: fig-wordcount-dist
+#| fig-cap: "Distribution of actual word counts (total across scored texts) for AI surrogates and human participants. Vertical lines indicate group medians. The difference in location and spread reflects that human texts were unconstrained and written in Swedish, while AI surrogate texts were constrained to a target length in English."
+#| echo: false
+#| fig-width: 8
+#| fig-height: 4
+#| fig-dpi: 300
+
+wc_plot_data <- d |>
+  mutate(Group = factor(c(AI = LABEL_AI, HU = LABEL_HU)[as.character(id_type)],
+                        levels = c(LABEL_AI, LABEL_HU)))
+
+wc_medians <- wc_plot_data |>
+  group_by(Group) |>
+  summarise(Mdn = median(actual_words), .groups = "drop")
+
+ggplot(wc_plot_data, aes(x = actual_words, fill = Group, color = Group)) +
+  geom_density(alpha = 0.35, linewidth = 0.8) +
+  geom_rug(alpha = 0.25, sides = "b") +
+  geom_vline(data = wc_medians, aes(xintercept = Mdn, color = Group, linetype = Group),
+             linewidth = 0.8) +
+  scale_fill_manual(values  = setNames(c(COL_AI_LINE, COL_HU_LINE), c(LABEL_AI, LABEL_HU))) +
+  scale_color_manual(values = setNames(c(COL_AI_LINE, COL_HU_LINE), c(LABEL_AI, LABEL_HU))) +
+  labs(x = "Actual word count (total across scored texts)", y = "Density",
+       fill = LABEL_SAMPLE, color = LABEL_SAMPLE, linetype = "Median") +
+  theme_classic(base_family = THESIS_FONT, base_size = THESIS_FONTSIZE) +
+  theme(legend.position = "bottom")
+
+rm(wc_plot_data, wc_medians)
+```
+
+## 12.2 RQ3a Sensitivity: Within-Group Regression of LLM Scores on Word Count
+
+For each group and need dimension, a simple linear regression predicts the LLM score from `actual_words`. A near-zero slope and low R² indicate that word count does not drive LLM scores within that group; the between-group comparison in Section 7 is then not confounded by the word count gap.
+
+```{r}
+#| label: rq3a-wc-regression
+#| include: false
+
+wc_reg_results <- lapply(names(need_cols), function(need_label) {
+  col <- need_cols[[need_label]]
+
+  fit_ai <- lm(as.formula(paste(col, "~ actual_words")), data = d_grp_ai)
+  fit_hu <- lm(as.formula(paste(col, "~ actual_words")), data = d_grp_human)
+
+  s_ai <- summary(fit_ai)
+  s_hu <- summary(fit_hu)
+
+  data.frame(
+    need     = need_label,
+    b_ai     = coef(fit_ai)[["actual_words"]],
+    se_ai    = s_ai$coefficients["actual_words", "Std. Error"],
+    p_ai     = s_ai$coefficients["actual_words", "Pr(>|t|)"],
+    r2_ai    = s_ai$r.squared,
+    b_hu     = coef(fit_hu)[["actual_words"]],
+    se_hu    = s_hu$coefficients["actual_words", "Std. Error"],
+    p_hu     = s_hu$coefficients["actual_words", "Pr(>|t|)"],
+    r2_hu    = s_hu$r.squared,
+    stringsAsFactors = FALSE
+  )
+})
+
+wc_reg_df <- dplyr::bind_rows(wc_reg_results)
+```
+
+```{r}
+#| label: tbl-rq3a-wc-regression
+#| tbl-cap: "Within-Group Regression of LLM Scores on Actual Word Count by Need Dimension (RQ3a Word Count Sensitivity)"
+#| echo: false
+
+wc_reg_df |>
+  transmute(
+    Need         = need,
+    `b (AI)`     = round(b_ai,  4),
+    `SE (AI)`    = round(se_ai, 4),
+    `p (AI)`     = fmt_p(p_ai),
+    `R² (AI)`    = round(r2_ai, 3),
+    `b (Human)`  = round(b_hu,  4),
+    `SE (Human)` = round(se_hu, 4),
+    `p (Human)`  = fmt_p(p_hu),
+    `R² (Human)` = round(r2_hu, 3)
+  ) |>
+  flextable() |>
+  style_apa7() |>
+  add_header_row(
+    values    = c("", LABEL_AI, LABEL_HU),
+    colwidths = c(1L, 4L, 4L)
+  ) |>
+  add_apa_note(paste0(
+    "OLS regression: LLM score ~ actual_words, fitted separately within each group. ",
+    "b = unstandardized slope (change in LLM score per additional word). ",
+    "R² = proportion of variance in LLM score explained by word count within that group. ",
+    "Near-zero b and R² indicate word count does not drive LLM scores within the group. ",
+    LABEL_AI, " N = ", nrow(d_grp_ai), "; ", LABEL_HU, " N = ", nrow(d_grp_human), "."
+  ))
+
+rm(wc_reg_results, wc_reg_df)
+```
+
+## 12.3 RQ3b Sensitivity: Partial Correlations Controlling for Word Count
+
+Within each group, both the LLM score and the questionnaire score are regressed on `actual_words`; the partial correlation is computed on the residuals. Specifically, both variables are individually regressed on `actual_words` via OLS; the Pearson correlation of the two residual vectors is then taken. This residualization approach is equivalent to a formal partial correlation when both regressions share the same single covariate and OLS is used — the values are numerically identical. This removes variance attributable to text length from both measures before assessing their correspondence. Bootstrap CIs use the same stratified resampling as Section 8.
+
+```{r}
+#| label: rq3b-partial-corr
+#| include: false
+
+set.seed(2026)
+boot_fn_partial_r <- function(data, i) {
+  db      <- data[i, ]
+  resid_l <- residuals(lm(llm ~ actual_words, data = db))
+  resid_q <- residuals(lm(q   ~ actual_words, data = db))
+  cor(resid_l, resid_q, method = "pearson")
+}
+
+partial_results <- lapply(names(need_cols), function(need_label) {
+  llm_col <- need_cols[[need_label]]
+  q_col   <- q_cols[[need_label]]
+
+  dat_ai <- data.frame(llm = d_grp_ai[[llm_col]], q = d_grp_ai[[q_col]],
+                       actual_words = d_grp_ai$actual_words)
+  dat_hu <- data.frame(llm = d_grp_human[[llm_col]], q = d_grp_human[[q_col]],
+                       actual_words = d_grp_human$actual_words)
+
+  pr_ai <- cor(residuals(lm(llm ~ actual_words, dat_ai)),
+               residuals(lm(q   ~ actual_words, dat_ai)))
+  pr_hu <- cor(residuals(lm(llm ~ actual_words, dat_hu)),
+               residuals(lm(q   ~ actual_words, dat_hu)))
+
+  boot_ai <- boot::boot(dat_ai, boot_fn_partial_r, R = BOOTSTRAP_SAMPLES)
+  boot_hu <- boot::boot(dat_hu, boot_fn_partial_r, R = BOOTSTRAP_SAMPLES)
+  ci_ai   <- boot::boot.ci(boot_ai, type = "perc")
+  ci_hu   <- boot::boot.ci(boot_hu, type = "perc")
+
+  raw_res <- Filter(function(x) x$need == need_label, rq3b_results)[[1]]
+
+  data.frame(
+    need        = need_label,
+    pr_ai       = pr_ai,
+    pr_ai_ci_lo = ci_ai$percent[4],
+    pr_ai_ci_hi = ci_ai$percent[5],
+    pr_hu       = pr_hu,
+    pr_hu_ci_lo = ci_hu$percent[4],
+    pr_hu_ci_hi = ci_hu$percent[5],
+    raw_r_ai    = raw_res$r_ai,
+    raw_r_hu    = raw_res$r_hu,
+    delta_ai    = pr_ai - raw_res$r_ai,
+    delta_hu    = pr_hu - raw_res$r_hu,
+    stringsAsFactors = FALSE
+  )
+})
+
+partial_df <- dplyr::bind_rows(partial_results)
+```
+
+```{r}
+#| label: tbl-rq3b-partial
+#| tbl-cap: "Partial Correlations Between LLM Scores and Questionnaire Scores Controlling for Actual Word Count by Need Dimension and Group (RQ3b Word Count Sensitivity)"
+#| echo: false
+
+partial_df |>
+  transmute(
+    Need        = need,
+    `r (Human)` = sprintf("%.2f [%.2f, %.2f]", pr_hu, pr_hu_ci_lo, pr_hu_ci_hi),
+    `Δr (HU)`   = round(delta_hu, 2),
+    `r (AI)`    = sprintf("%.2f [%.2f, %.2f]", pr_ai, pr_ai_ci_lo, pr_ai_ci_hi),
+    `Δr (AI)`   = round(delta_ai, 2)
+  ) |>
+  flextable() |>
+  style_apa7() |>
+  colformat_double(digits = 2) |>
+  set_header_labels(
+    `r (Human)` = paste0("pr [", CI_LABEL, "]"),
+    `Δr (HU)`   = "Δr",
+    `r (AI)`    = paste0("pr [", CI_LABEL, "]"),
+    `Δr (AI)`   = "Δr"
+  ) |>
+  add_header_row(
+    values    = c("", LABEL_HU, LABEL_AI),
+    colwidths = c(1L, 2L, 2L)
+  ) |>
+  add_apa_note(paste0(
+    "pr = partial Pearson correlation between LLM score and questionnaire score, ",
+    "with actual word count partialled out via residualization within each group. ",
+    "CIs: 95% bootstrap percentile (R = ", BOOTSTRAP_SAMPLES, "). ",
+    "Δr = pr − r(unrounded Pearson); reference values from @tbl-rq3b-fisher-zdiff. ",
+    "Positive Δr indicates the partial correlation exceeds the raw correlation (word count suppressed the association); ",
+    "negative Δr indicates word count inflated the raw correlation. ",
+    LABEL_AI, " N = ", nrow(d_grp_ai), "; ", LABEL_HU, " N = ", nrow(d_grp_human), "."
+  ))
+```
+
+```{r}
+#| label: fig-rq3b-partial
+#| fig-cap: "Partial Pearson correlations (controlling for actual word count) between LLM scores and questionnaire scores by need dimension and group (RQ3b). Open symbols with error bars = partial r (this section); filled symbols = raw Pearson r from @tbl-rq3b-fisher-zdiff for reference. Error bars = 95% bootstrap CIs for partial r."
+#| echo: false
+#| fig-width: 6
+#| fig-height: 4
+#| fig-dpi: 300
+
+DODGE_W_12 <- 0.12
+
+partial_plot_data <- partial_df |>
+  dplyr::mutate(
+    need = factor(need, levels = c(TABLE_LABEL_AUT, TABLE_LABEL_COM, TABLE_LABEL_REL))
+  ) |>
+  tidyr::pivot_longer(
+    cols      = c(pr_ai, pr_hu),
+    names_to  = "group_key",
+    values_to = "pr"
+  ) |>
+  dplyr::mutate(
+    group = ifelse(group_key == "pr_ai", LABEL_AI, LABEL_HU),
+    ci_lo = ifelse(group_key == "pr_ai", pr_ai_ci_lo, pr_hu_ci_lo),
+    ci_hi = ifelse(group_key == "pr_ai", pr_ai_ci_hi, pr_hu_ci_hi),
+    raw_r = ifelse(group_key == "pr_ai", raw_r_ai, raw_r_hu),
+    x     = as.numeric(need) + ifelse(group == LABEL_HU, -DODGE_W_12, DODGE_W_12),
+    x_raw = as.numeric(need) + ifelse(group == LABEL_HU, -DODGE_W_12 * 2, DODGE_W_12 * 2),
+    group = factor(group, levels = c(LABEL_HU, LABEL_AI))
+  )
+
+group_colors_12 <- c(setNames(COL_AI_SHADES[1], LABEL_AI),
+                     setNames(COL_HU_SHADES[1], LABEL_HU))
+
+ggplot(partial_plot_data, aes(x = x, color = group, fill = group)) +
+  geom_hline(yintercept = 0, linetype = "dashed", linewidth = 0.4, color = "grey60") +
+  geom_errorbar(aes(ymin = ci_lo, ymax = ci_hi), width = 0, linewidth = 0.8) +
+  geom_point(aes(y = pr), shape = 21, fill = "white", size = 1.8, stroke = 1.8) +
+  geom_point(aes(x = x_raw, y = raw_r), shape = 16, size = 2.5, alpha = 0.35) +
+  scale_x_continuous(
+    breaks   = 1:3,
+    labels   = c(TABLE_LABEL_AUT, TABLE_LABEL_COM, TABLE_LABEL_REL),
+    limits   = c(0.6, 3.6),
+    position = "top"
+  ) +
+  scale_color_manual(values = group_colors_12, name = NULL) +
+  scale_fill_manual(values  = group_colors_12, name = NULL) +
+  labs(x = NULL, y = "Correlation") +
+  theme_minimal(base_size = THESIS_FONTSIZE) +
+  theme(
+    text               = element_text(family = THESIS_FONT),
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor.x = element_blank(),
+    axis.text.x.top    = element_text(colour = "black"),
+    panel.grid.major.y = element_line(linewidth = 0.3),
+    panel.grid.minor.y = element_line(linewidth = 0.3),
+    axis.title.y       = element_text(margin = margin(r = 12)),
+    legend.position    = c(0.18, 0.15),
+    legend.direction   = "horizontal",
+    legend.margin      = margin(t = 4),
+    legend.background  = element_rect(fill = "white", color = NA),
+    legend.key         = element_blank()
+  )
+```
+
+*Note.* Open symbols with error bars = partial r [95% bootstrap CI, R = `r BOOTSTRAP_SAMPLES`]. Filled symbols = raw Pearson r from @tbl-rq3b-fisher-zdiff (no CI shown). AI surrogates N = `r nrow(d_grp_ai)`; Humans N = `r nrow(d_grp_human)`.
+
+```{r}
+#| label: session-info
+#| include: false
+sessionInfo()
+```

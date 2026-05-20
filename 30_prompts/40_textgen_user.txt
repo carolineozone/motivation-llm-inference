@@ -1,0 +1,7 @@
+Write 5 appreciation texts to 5 different coworkers. Each text should be approximately {target_words} words long.
+
+Each text should describe something specific the person has done or said in a professional context, and what you valued about it. Be specific rather than general. Draw on details from your own work context, role, and professional environment.
+
+Do not open multiple texts with the same phrase or sentence structure. Vary how each appreciation begins.
+
+Write each text as a direct, spoken-style paragraph addressed to the coworker — begin directly with the appreciation itself. Do not open with a name or any form of address. Do not use a letter salutation (no "Hi X," or "Dear X,"), no closing line, and no sign-off like "Best," or "[Your Name]". The text should read like a candid verbal appreciation or a written note, not a formal letter.

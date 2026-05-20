@@ -1,0 +1,71 @@
+# pricing.yaml
+# Token prices in USD per 1M tokens.
+# Update whenever providers change rates.
+# Source: check platform dashboards before each run.
+# NOTE: use pinned model version strings (not aliases) as keys in scripts.
+
+claude-sonnet:
+  input: 3.00
+  output: 15.00
+  batchinput: 1.50   # verified 2026-04-12 against Anthropic console (was 1.78 — wrong)
+  batchoutput: 7.50  # verified 2026-04-12 against Anthropic console (was 8.92 — wrong)
+  snapshot: "claude-sonnet-4-6"  # no snapshot necessary as in OpenAI
+
+claude-haiku:
+  input: 1.00   # verified 2026-04-12 (was 1.19 — wrong)
+  output: 5.00  # verified 2026-04-12 (was 5.95 — wrong)
+  batchinput: 0.50   # verified 2026-04-12 (was 0.59 — wrong)
+  batchoutput: 2.50  # verified 2026-04-12 (was 2.97 — wrong)
+  snapshot: "claude-haiku-4-5-20251001"
+
+gpt-5.1:           # GPT-5.1 follows instructions better than 5.0
+  input: 1.25
+  cachedinput: 0.125
+  output: 10.00
+  batchinput: 0.625
+  batchcachedinput: 0.0625
+  batchoutput: 5.00
+  snapshot: "gpt-5.1-2025-11-13"  # https://developers.openai.com/api/docs/models/gpt-5.1
+
+gpt-5:           # do not use as gpt-5.1 is better and has same price
+  input: 1.25
+  cachedinput: 0.125
+  output: 10.00
+  batchinput: 0.625
+  batchcachedinput: 0.0625
+  batchoutput: 5.00
+  snapshot: "gpt-5-2025-08-07"  # https://developers.openai.com/api/docs/models/gpt-5
+
+gpt-5-mini:
+  input: 0.25
+  cachedinput: 0.025
+  output: 2.00
+  batchinput: 0.125
+  batchcachedinput: 0.0125
+  batchoutput: 1.00
+  snapshot: "gpt-5-mini-2025-08-07"  # https://developers.openai.com/api/docs/models/gpt-5-mini
+
+gpt-5-nano:
+  input: 0.05
+  cachedinput: 0.005
+  output: 0.40
+  batchinput: 0.025
+  batchcachedinput: 0.0025
+  batchoutput: 0.20
+  snapshot: "gpt-5-nano-2025-08-07"  # https://developers.openai.com/api/docs/models/gpt-5-nano
+
+gpt-4o:       # do not use 2024-05-13 snapshot, it has different prices
+  input: 2.50
+  cachedinput: 1.25
+  output: 10.00
+  batchinput: 1.25
+  batchoutput: 5.00
+  snapshot: "gpt-4o-2024-11-20"  # https://developers.openai.com/api/docs/models/gpt-4o
+
+gpt-4o-mini:
+  input: 0.15
+  cachedinput: 0.075
+  output: 0.60
+  batchinput: 0.075
+  batchoutput: 0.30
+  snapshot: "gpt-4o-mini-2024-07-18"  # https://developers.openai.com/api/docs/models/gpt-4o-mini

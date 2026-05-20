@@ -1,0 +1,31 @@
+# Instructions
+
+You are an expert organizational psychologist acting as a research coder. Your task is to evaluate a persona profile to determine if the individual has peer-level colleagues.
+
+Definitions:
+
+Peer-Level Colleagues: Individuals at a similar organizational level with comparable authority who share the same immediate work environment.
+
+Exclusions: Do NOT count:
+- Supervisors or managers
+- Mentors or coaches
+- Direct reports (subordinates)
+- Apprentices or trainees supervised by the persona
+- External clients or customers
+- External professional networks (e.g., "other investigators" at different firms)
+- People mentioned only as recipients of help, training, or service
+
+Coding Rules:
+
+Employment Context (apply first):
+- If the persona explicitly describes working for a named employer or organisation (e.g., USPS, a retail store, a hospital, a company, an agency), classify as TRUE — employed workers in organisations typically have peers.
+- If the persona describes running their own business, freelancing, or working independently for clients, apply the Strict Evidence rule below.
+- If employment status is ambiguous, apply the Strict Evidence rule.
+
+Strict Evidence (for self-employed / ambiguous cases): Only classify as TRUE if the text explicitly mentions a team, coworkers, colleagues, or shared tasks with peer-level others in the same organisation.
+
+Avoid Stereotypes: Do not assume peers exist based on job title or industry alone — the employment context rule takes precedence over occupational assumptions.
+
+Soft Skills ≠ Structural Peers: Mentions of "teamwork skills," "collaboration experience," "mentoring others," or "working with clients" do NOT constitute evidence of peer-level colleagues.
+
+Output: First provide your reasoning (1–2 sentences citing specific textual evidence or its absence), then your classification.

@@ -1,0 +1,107 @@
+# Project Configuration File
+project:
+  name: "LLM Psychological Assessment"
+  author: "Caroline Mueller"
+
+paths:
+  root: "."  # This tells your script to look in the current folder
+  data: "10_data"
+  scripts: "20_scripts"
+  prompts: "30_prompts"
+  analysis: "40_analyses"
+
+# Coding Guidelines
+coding_standards:
+  python: "PEP 8"
+  r: "Tidyverse"
+
+# Tool Versions (for documentation - last updated Jan 2026)
+tools:
+  python: "3.13.7"
+  r: "4.5.2"
+  rstudio: "2026.01.0+392"
+  vscode: "1.108.2"
+  git: "2.47.0.windows.2"
+  zotero: "7.0.15"
+
+# Global defaults for the thesis project
+defaults:
+  model: "gpt-5-mini"
+  reasoning_effort: "minimal" # gpt-5 models do not use temperature
+  seed: 42
+
+# ===========================================================================
+# PRODUCTION RUN — 2026
+# N=400 personas. Text generation + BPNS: GPT-5 mini. Scoring: Claude Haiku 4.5.
+# ===========================================================================
+
+# Pipeline Stages
+stages:
+  30_coworkerfilter: # PROD
+    persona_data: "00_personas_prod_800.jsonl"
+    schema: "CoworkerFilter" # no reasoning
+    conversation_format: "json_dump"  # single user message + JSON persona block
+    defaults:
+      reasoning_effort: "minimal"
+      prompt_developer: "30_coworker_dev"
+      prompt_user: "30_coworker_user"
+      max_completion_tokens: 100
+
+    variants:
+      mini:
+        model_key: "gpt-5-mini"
+
+  40_textgeneration: # PRODUCTION — N=400, locked 2026-03-29
+    persona_data: "35_personas_prod_800_20260327-1653_included_785.jsonl"
+    schema: "TextsOutput"
+    conversation_format: "multiturn"
+    defaults:
+      prompt_developer: "40_textgen_dev"
+      prompt_user: "40_textgen_user"
+
+    variants:
+      mini-med-50:
+        model_key: "gpt-5-mini"
+        reasoning_effort: "medium"
+        target_words: 50
+        max_completion_tokens: 3000
+      mini-med-150:
+        model_key: "gpt-5-mini"
+        reasoning_effort: "medium"
+        target_words: 150
+        max_completion_tokens: 4000
+      mini-med-300:
+        model_key: "gpt-5-mini"
+        reasoning_effort: "medium"
+        target_words: 300
+        max_completion_tokens: 6000
+
+  50_complete_bpns: # LOCKED 2026-03-29 — it05_neutral_dev (dev_v03 x user_v03, medium effort)
+    persona_data: "35_personas_prod_800_20260327-1653_included_785.jsonl"
+    schema: "BPNSCompletion" # no reasoning, production stage
+    conversation_format: "multiturn"
+    defaults:
+      prompt_developer: "50_complete_bpns_dev"
+      prompt_user: "50_complete_bpns_user"
+      max_completion_tokens: 2500
+
+    variants:
+      it05_neutral_dev: # LOCKED production variant
+        model_key: "gpt-5-mini"
+        reasoning_effort: "medium"
+
+  60_scoring_claude: # PRODUCTION — locked 2026-04-12
+    input_data: "45_prod_texts_n300.jsonl"  # batch 2 (personas 101-400); batch 1 (45_prod_texts_n100.jsonl) done 2026-04-12
+    schema: "LLMScoring"
+    conversation_format: "text_only"
+    defaults:
+      n_repeats: 3
+      prompt_developer: null
+      prompt_user: "60_score_texts_user"
+      max_completion_tokens: 2000
+      effort: null
+      thinking: null
+      temperature: null
+    variants:
+      sonnet:
+        model_key: "claude-sonnet"

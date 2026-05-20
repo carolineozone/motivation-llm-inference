@@ -1,0 +1,54 @@
+﻿# Track empty folders
+!**/.gitkeep
+
+# Data files (protect raw data)
+10_data/10_raw/
+10_data/50_batches/
+70_literature/
+90_examples/
+
+# My own temporary folders
+**/temp/
+time_log.md
+
+# --- Secrets & Config ---
+# Expanded to cover R and common Python secret patterns
+.env
+*.env
+.Renviron
+.Rprofile
+secrets.yaml
+github-recovery-codes.txt
+CONTEXT.md
+# Only ignore config.yaml if it contains keys; otherwise keep it for reproducibility
+# config.yaml
+
+# Python
+__pycache__/
+.venv/
+venv/
+*.pyc
+.ruff_cache/
+.pytest_cache/
+
+# R/RStudio/Quarto
+.Rproj.user/
+.Rhistory
+.RData
+_site/
+*.qmd.html
+*.rmarkdown
+**/*_cache/
+.quarto/
+*.knit.md
+
+# IDEs
+.vscode/settings.json
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+.claude/
+60_project/
+Rplots.pdf

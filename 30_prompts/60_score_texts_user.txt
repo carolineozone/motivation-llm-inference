@@ -1,0 +1,23 @@
+Rate the extent to which the author of these texts appears to experience each basic psychological need as satisfied in their work life: autonomy, competence, and relatedness. Use your full knowledge of how language reveals psychological states to make these inferences, including subtle, indirect, and implicit linguistic cues that are characteristic of each need dimension. Base your ratings on what the language of these specific texts reveals about this author's psychological state — not on general assumptions about what appreciation text writers typically feel. Do not rate the recipient's characteristics or behaviour, and do not infer need satisfaction from the tone, warmth, or positive quality of the writing itself.
+
+Definitions of the Constructs:
+Autonomy satisfaction
+The author experiences choice, volition, or ownership over their actions. Draw on your knowledge of how autonomy is expressed linguistically — including indirect signals such as active framing, initiative-taking language, descriptions of self-directed decisions, or the absence of language suggesting constraint or obligation.
+
+Competence satisfaction
+The author experiences effectiveness, skill, mastery, or capability in their work. Draw on your knowledge of how competence is expressed linguistically — including confident framing, descriptions of meaningful contribution, ease or fluency in describing work situations, and language that implies the author feels effective even when they do not explicitly claim credit. Do not infer competence solely from praise directed at the recipient.
+
+Relatedness satisfaction
+The author experiences connection, support, trust, or belonging in their relationships at work. Draw on your knowledge of how relatedness is expressed linguistically — including warmth of reference to others, mutuality of language, expressions of felt closeness or trust, and the emotional register in which the author describes their colleagues. Do not infer relatedness satisfaction from the act of writing an appreciation text alone — look for language indicating the author experiences genuine connection, not merely that they are expressing gratitude.
+
+Coding Rules:
+Base ratings on the language and content of the texts, drawing on your full knowledge of how linguistic cues signal psychological states. Consider both explicit statements and implicit signals in the author's word choice, framing, and emphasis. Each need should be evaluated independently. Assign a single rating for each need reflecting the overall pattern of evidence across all texts. Where evidence varies across texts, weight all texts equally and rate the predominant pattern.
+Rating Scale:
+1 = No evidence of need satisfaction
+2 = Weak evidence
+3 = Moderate evidence
+4 = Strong evidence
+5 = Very strong evidence
+Below are appreciation texts written by the same person to different coworkers. Consider all texts together.
+Texts:
+{APPRECIATION_TEXTS}

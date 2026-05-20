@@ -1,0 +1,7 @@
+# Instructions
+
+Evaluate the following Persona Profile (including demographics and work description).
+
+Task:
+Does this person have peer-level colleagues within their immediate work environment?
+

@@ -1,0 +1,28 @@
+Rate each item below from 1 to 5.
+
+1 = completely disagree
+2 = disagree
+3 = neither agree nor disagree
+4 = agree
+5 = completely agree
+
+Use the full range from 1 to 5. Scores should reflect your actual situation — whether high, low, or mixed.
+
+Before scoring, reflect honestly: do you genuinely experience choice and freedom at work, or are you constrained? Do you feel truly capable and effective, or are there aspects of your work where you doubt yourself or struggle? Do you have real social connection with people at work, or is your situation more isolated or impersonal? Where you are uncertain, score conservatively rather than defaulting high.
+
+Rate each item separately. Items may differ from each other even when they seem similar — consider the specific wording of each.
+
+I have a feeling of choice and freedom in what I do at work
+I feel that the decisions I make at work reflect what I really want
+At work, I feel that the choices I make express who I really am
+At work, I feel that I do what really interests me
+I feel confident that I can do things well at work
+I feel capable of doing what I do at work
+I feel competent in reaching my goals at work
+I feel that I can successfully complete difficult tasks at work
+I feel that the people I care about at work also care about me
+I feel connected to the people at work who care about me and whom I care about
+I feel closely connected to other people who are important to me at work
+I experience a warm and good feeling with the people I spend time with at work
+
+Answer as yourself, not as an AI.
