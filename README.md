@@ -1,4 +1,4 @@
-# Can LLMs Infer Basic Psychological Need Satisfaction?
+# Using AI to Detect Motivation: Inferring Basic Psychological Need Satisfaction with a Large Language Model from Employee Appreciation Texts with Humans and AI Surrogates
 
 **Caroline Müller & Sebastian Oscarson**  
 Stockholm University — PSMT42 Master's Thesis  
@@ -10,7 +10,7 @@ Stockholm University — PSMT42 Master's Thesis
 
 This repository contains the data pipeline and analysis code for a thesis investigating whether large language models (LLMs) can infer **basic psychological need satisfaction** (autonomy, competence, relatedness — Self-Determination Theory) from workplace appreciation texts.
 
-The study uses AI-generated surrogate data: synthetic personas write appreciation messages to coworkers, and a separate LLM scorer rates the texts for need satisfaction. Surrogate scores are compared against questionnaire-derived need satisfaction scores for the same personas.
+The study uses AI-generated surrogate data: synthetic personas write appreciation messages to coworkers, and a separate LLM scorer rates the texts for need satisfaction. Surrogate scores are compared against questionnaire-derived need satisfaction scores for the same personas. A human rater sample provides a parallel reference for comparison.
 
 **Final sample:** N = 400 personas × 3 text lengths (50/150/300 words) × 3 text counts (1/3/5 texts) × 3 scoring repeats = 10,800 scoring observations.
 
@@ -23,10 +23,26 @@ The study uses AI-generated surrogate data: synthetic personas write appreciatio
 20_scripts/       Python pipeline scripts
 30_prompts/       LLM prompt templates and Pydantic output schemas
 40_analyses/      R/Quarto analysis files (RQ2, RQ3, H1c/d)
+50_humans/        Human rater data and analysis scripts (Sebastian Oscarson)
 config.yaml       Stage configuration (models, prompts, parameters)
 pricing.yaml      Token pricing table (USD/1M tokens)
 requirements.txt  Python dependencies
 ```
+
+### 50_humans/
+
+Contains all materials related to the human rater sample collected and analysed by Sebastian Oscarson:
+
+- `Data_Complete_Run2.csv` — Full human rater dataset (Run 2)
+- `Data_Complete_Run2_flagged.csv` — Same dataset with quality flags applied
+- `Data_Complete_Run2_wc.csv` — Dataset with word count covariates
+- `_Data Human Sample RQ1` — Raw data file for the RQ1 human sample
+- `Descriptives_and_Reliability_v2.R` — Descriptive statistics and reliability analyses
+- `Exclusions_questionnaire.R` — Exclusion criteria and filtering for questionnaire responses
+- `H1a_b_c_+ExplAim_Hypothesis_Tests_v2.R` — Hypothesis tests for H1a, H1b, H1c and exploratory aims
+- `H1b_partial_correlations_Run2.R` — Partial correlation analyses for H1b
+- `H1b_wordcount_covariate_Run2.R` — H1b re-analyses with word count as covariate
+- `Power Simulation (two-tailed).r` — Power simulation script
 
 ---
 
@@ -98,7 +114,7 @@ See `config.yaml` for stage definitions, model versions, and prompt references.
 
 All pipeline inputs and outputs are included in `10_data/`. Raw source data (SCOPE personas, HuggingFace dataset) is not included — see `20_scripts/00_sample_personas.py` and the [SCOPE dataset](https://huggingface.co/datasets) for reproduction.
 
-Human rater data is not included in this repository (privacy).
+Human rater data and analysis scripts are in `50_humans/`.
 
 ---
 
@@ -106,4 +122,4 @@ Human rater data is not included in this repository (privacy).
 
 If you use this code or data, please cite:
 
-> Müller, C., & Oscarson, S. (2026). *Can LLMs infer basic psychological need satisfaction? A surrogate data approach using workplace appreciation texts.* Master's thesis, Stockholm University.
+> Müller, C., & Oscarson, S. (2026). *Using AI to detect motivation: Inferring basic psychological need satisfaction with a large language model from employee appreciation texts with humans and AI surrogates.* Master's thesis, Stockholm University.
