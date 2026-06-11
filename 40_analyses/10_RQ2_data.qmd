@@ -1,0 +1,1103 @@
+---
+title: "RQ2 Data Preparation & Descriptives"
+subtitle: "AI Surrogate Sample — Import, Cleaning, Exclusions, Reliability"
+author: "Caroline Müller"
+date: "2026-05-16"
+format:
+  html:
+    code-fold: true
+    code-summary: "Show code"
+    code-tools: true
+    toc: true
+    self-contained: true
+    fig-cap-location: top
+editor:
+  markdown:
+    wrap: 72
+knitr:
+  opts_chunk:
+    dpi: 300
+---
+
+# 1 Overview
+
+This file covers everything upstream of the inferential RQ2 analyses:
+
+- Raw CSV import and audit
+- Type conversion, column renaming, and structural integrity gates
+- Sequential exclusion rules (age, completeness, truncation)
+- Demographic, textual, and questionnaire descriptives
+- LLM score descriptives by condition
+- Questionnaire reliability (Cronbach alpha / Omega)
+- LLM scoring reliability (ICC)
+- CFA on questionnaire items (1-factor vs 3-factor)
+
+**Outputs written to `10_data/80_analyses_exports/`:**
+
+| File | Used by |
+|------|---------|
+| `d_rq2_clean.rds` | 20_RQ2_analyses |
+| `d_rq3_ai_conditions.rds` | 20_RQ2_analyses, 50_additional_analyses |
+| `d_rq3_ai.rds` | 30_RQ3_data |
+| `tbl_icc_raw.rds` | 30_RQ3_data (display) |
+| `tbl_icc2k_raw.rds` | reference |
+| `tbl_word_count_by_condition.rds` | 30_RQ3_data |
+
+---
+
+# 2 Setup
+
+## 2.1 Environment
+
+```{r}
+#| label: setup-environment
+#| include: false
+#| warning: false
+
+graphics.off()
+
+suppressPackageStartupMessages({
+  library(dplyr)
+  library(ggplot2)
+  library(tidyr)
+  library(flextable)
+  library(rempsyc)
+  library(scales)
+  library(psych)
+  library(performance)
+  library(officer)
+  library(paletteer)
+  library(janitor)
+  library(systemfonts)
+  library(ragg)
+  library(lavaan)
+  library(stringr)
+  library(purrr)
+})
+
+knitr::opts_chunk$set(dev = "ragg_png")
+if (.Platform$OS.type == "windows") windowsFonts(Calibri = windowsFont("Calibri"))
+
+set.seed(2026)
+message("Libraries loaded.")
+```
+
+## 2.2 Shared Constants
+
+```{r}
+#| label: setup-common
+#| include: false
+
+source("00_common.R")
+```
+
+## 2.3 File-Level Constants
+
+```{r}
+#| label: setup-constants
+#| include: false
+
+data_path       <- "../10_data/70_merge_outputs_20260412-1426.csv"
+EXPORT_DIR      <- "../10_data/80_analyses_exports"
+MAX_LOSS_THRESHOLD <- 0.10
+
+edu_levels <- c("High School", "Some College", "Associate's",
+                "Bachelor's", "Master's", "Doctorate", "Other")
+```
+
+---
+
+# 3 Data Import
+
+## 3.1 Import CSV
+
+```{r}
+#| label: import-raw
+#| message: false
+
+d_raw <- read.csv(data_path)
+message("Loaded: ", basename(data_path),
+        " | Modified: ", format(file.mtime(data_path), "%Y-%m-%d %H:%M"))
+```
+
+## 3.2 Import Audit
+
+```{r}
+#| label: tbl-import-audit
+#| echo: false
+#| tbl-cap: "AI Data Import Audit"
+
+tbl_import_audit <- tibble::tribble(
+  ~Metric,                   ~Value,
+  "Source file",             basename(data_path),
+  "Total rows",              as.character(nrow(d_raw)),
+  "Distinct AI surrogates",  as.character(dplyr::n_distinct(d_raw$uuid)),
+  "Columns",                 as.character(ncol(d_raw))
+)
+
+tbl_import_audit |> flextable() |> style_apa7()
+```
+
+---
+
+# 4 Data Cleaning
+
+## 4.1 Type Conversion and Renaming
+
+```{r}
+#| label: clean-rename
+#| include: false
+
+d <- d_raw |>
+  rename(
+    text_count   = n_texts,
+    actual_words = word_count,
+    uuid             = uuid,
+    age              = age,
+    gender           = gender,
+    education        = education,
+    occupation       = occupation,
+    country          = country,
+    race             = race,
+    nationality      = nationality,
+    income_category  = income_category,
+    target_words     = target_words,
+    repeat_id        = repeat_id,
+    q_aut_1 = q_aut_1, q_aut_2 = q_aut_2, q_aut_3 = q_aut_3, q_aut_4 = q_aut_4,
+    q_com_1 = q_com_1, q_com_2 = q_com_2, q_com_3 = q_com_3, q_com_4 = q_com_4,
+    q_rel_1 = q_rel_1, q_rel_2 = q_rel_2, q_rel_3 = q_rel_3, q_rel_4 = q_rel_4,
+    llm_aut = llm_aut, llm_com = llm_com, llm_rel = llm_rel
+  ) |>
+  mutate(
+    uuid            = as.character(uuid),
+    age             = as.character(age),
+    gender          = as.character(gender),
+    education       = as.character(education),
+    occupation      = as.character(occupation),
+    country         = as.character(country),
+    race            = as.character(race),
+    nationality     = as.character(nationality),
+    income_category = as.character(income_category),
+    actual_words    = as.integer(actual_words),
+    target_words    = as.integer(target_words),
+    text_count      = as.integer(text_count),
+    repeat_id       = as.integer(repeat_id),
+    llm_aut         = as.integer(llm_aut),
+    llm_com         = as.integer(llm_com),
+    llm_rel         = as.integer(llm_rel),
+    across(starts_with("q_"), as.integer)
+  )
+
+message("Type conversion complete.")
+```
+
+## 4.2 Structural Integrity Gates
+
+```{r}
+#| label: clean-integrity
+#| include: false
+
+required_vars <- c("uuid", "text_count", "repeat_id", "actual_words",
+                   "llm_aut", "llm_com", "llm_rel")
+missing_vars  <- setdiff(required_vars, names(d))
+if (length(missing_vars) > 0) {
+  stop("CRITICAL: Missing columns: ", paste(missing_vars, collapse = ", "))
+}
+
+# Content integrity: flag conditions with > MAX_LOSS_THRESHOLD missing
+content_check <- d |>
+  group_by(condition_raw = paste0(target_words, "w-", text_count)) |>
+  summarise(
+    planned    = n(),
+    valid_text = sum(!is.na(actual_words)),
+    .groups    = "drop"
+  )
+
+high_loss <- content_check |>
+  filter((planned - valid_text) / planned > MAX_LOSS_THRESHOLD)
+
+if (nrow(high_loss) > 0) {
+  stop("CRITICAL DATA LOSS in conditions: ",
+       paste(high_loss$condition_raw, collapse = ", "))
+}
+
+message("Structural integrity gates passed.")
+```
+
+## 4.3 Add Derived Columns
+
+Condition factors, questionnaire composites, and age numeric:
+
+```{r}
+#| label: clean-add-columns
+#| include: false
+
+# Condition factor
+d <- d |>
+  mutate(
+    condition  = factor(
+      paste0(WORD_LENGTH_LABELS[as.character(target_words)], "-", text_count),
+      levels = CONDITIONS
+    ),
+    text_count = factor(text_count, levels = N_TEXTS_VARIANTS)
+  )
+
+# Questionnaire composites — exactly 4 items each (AI sample)
+d <- d |>
+  mutate(
+    q_aut_mean = rowMeans(across(c(q_aut_1, q_aut_2, q_aut_3, q_aut_4)), na.rm = TRUE),
+    q_com_mean = rowMeans(across(c(q_com_1, q_com_2, q_com_3, q_com_4)), na.rm = TRUE),
+    q_rel_mean = rowMeans(across(c(q_rel_1, q_rel_2, q_rel_3, q_rel_4)), na.rm = TRUE)
+  )
+
+# Age: parse "20-29" style strings into age_low, age_high, age_mid, age_bracket
+process_age_string <- function(x) {
+  x_char <- trimws(as.character(x))
+  lower  <- NA_real_; upper <- NA_real_
+  if (grepl("-", x_char)) {
+    parts <- as.numeric(strsplit(x_char, "\\s*-\\s*")[[1]])
+    lower <- parts[1]; upper <- parts[2]
+  } else if (x_char == "70 or older") {
+    lower <- 70; upper <- 75
+  } else if (grepl("^[0-9]+$", x_char)) {
+    lower <- as.numeric(x_char); upper <- as.numeric(x_char)
+  }
+  data.frame(age_low = lower, age_high = upper, age_mid = (lower + upper) / 2)
+}
+
+age_raw <- d |> distinct(age) |> filter(!is.na(age)) |>
+  mutate(age = as.character(age)) |> pull(age)
+
+age_map <- purrr::map(age_raw, function(v) {
+  res          <- process_age_string(v)
+  d_start      <- floor(res$age_low / 10) * 10
+  res$age_bracket <- if (!is.na(res$age_low) && res$age_low >= 70) "70 or older" else
+                        paste0(d_start, "-", d_start + 9)
+  res$decade_start <- d_start
+  data.frame(age = v, res, stringsAsFactors = FALSE)
+}) |> purrr::list_rbind()
+
+d <- d |>
+  mutate(age = as.character(age)) |>
+  dplyr::select(-any_of(c("age_low", "age_high", "age_mid", "age_bracket",
+                           "decade_start"))) |>
+  left_join(age_map, by = "age")
+
+rm(age_raw)
+message("Derived columns added.")
+```
+
+---
+
+# 5 Exclusion Rules
+
+```{r}
+#| label: exclusion-init
+#| include: false
+
+n_step0    <- n_distinct(d$uuid); rows_step0 <- nrow(d)
+message("Step 0 (import): ", n_step0, " AI surrogates, ", rows_step0, " rows.")
+```
+
+## 5.1 Rule 1 — Age (20–69)
+
+```{r}
+#| label: exclusion-rule1-age
+#| include: false
+
+d <- d |> filter(age_low >= 20, age_low < 70)
+n_step1    <- n_distinct(d$uuid); rows_step1 <- nrow(d)
+message("Rule 1 (age): N = ", n_step1, " remaining.")
+```
+
+## 5.2 Rule 2 — Row Completeness (27 rows per persona)
+
+```{r}
+#| label: exclusion-rule2-completeness
+#| include: false
+
+incomplete_uuids <- d |> count(uuid) |>
+  filter(n != ROWS_PER_PERSONA) |> pull(uuid)
+n_removed_incomplete <- length(incomplete_uuids)
+
+# Rule 2 filter is suspended if all personas are complete; kept commented for
+# production confirmation — uncomment to enforce:
+# d <- d |> filter(!(uuid %in% incomplete_uuids))
+
+n_step2    <- n_distinct(d$uuid); rows_step2 <- nrow(d)
+if (n_removed_incomplete > 0) {
+  message("Rule 2 (completeness): ", n_removed_incomplete,
+          " incomplete persona(s) found — filter suspended.")
+} else {
+  message("Rule 2 (completeness): All personas have ", ROWS_PER_PERSONA, " rows.")
+}
+```
+
+## 5.3 Rule 3 — Text Truncation (< 75% of target)
+
+```{r}
+#| label: exclusion-rule3-truncation
+#| include: false
+
+uuids_failing <- d |>
+  filter(actual_words < (target_words * TEXT_TRUNC_THRESHOLD)) |>
+  distinct(uuid) |> pull(uuid)
+
+n_personas_removed_trunc <- length(uuids_failing)
+n_rows_removed_trunc     <- sum(d$uuid %in% uuids_failing)
+d <- d |> filter(!uuid %in% uuids_failing)
+
+n_step3    <- n_distinct(d$uuid); rows_step3 <- nrow(d)
+message("Rule 3 (truncation): Removed ", n_personas_removed_trunc,
+        " UUID(s) (", n_rows_removed_trunc, " rows). Final N = ", n_step3, ".")
+```
+
+## 5.4 Attrition Table
+
+```{r}
+#| label: tbl-attrition
+#| echo: false
+#| tbl-cap: "Sequential Exclusion Rules Applied to AI Surrogate Sample"
+
+tbl_attrition <- tibble::tibble(
+  Step = 0:3,
+  Rule = c("Raw import", "Age (20–69)", "Completeness (27 rows)", "Truncation (75% threshold)"),
+  `Removed (Pers.)` = c("—", n_step0 - n_step1, n_step1 - n_step2, n_step2 - n_step3),
+  `Removed (Rows)`  = c("—", rows_step0 - rows_step1, rows_step1 - rows_step2, rows_step2 - rows_step3),
+  `AI Surrogates (n)` = c(n_step0, n_step1, n_step2, n_step3),
+  `Rows (n)` = c(rows_step0, rows_step1, rows_step2, rows_step3)
+)
+
+tbl_attrition |>
+  flextable() |>
+  align(j = 1:6, align = "center", part = "all") |>
+  style_apa7() |>
+  bold(i = ~ as.numeric(`Removed (Pers.)`) > 0, j = 3:4) |>
+  add_apa_note("Steps 1–3 are surrogate-level exclusions. Rule 2 (completeness) filter suspended pending production confirmation.")
+```
+
+## 5.5 Final Sample
+
+```{r}
+#| label: final-sample-summary
+#| include: false
+
+d_persona <- d |> distinct(uuid, .keep_all = TRUE)
+
+# Verify no truncated rows remain
+n_trunc_rem <- sum(d$actual_words < (d$target_words * TEXT_TRUNC_THRESHOLD), na.rm = TRUE)
+if (n_trunc_rem > 0) warning("Rule 3 Alert: ", n_trunc_rem, " truncated rows remain.")
+
+message("Final analytic sample: ", nrow(d_persona), " AI surrogates, ",
+        nrow(d), " rows.")
+```
+
+```{r}
+#| label: setup-d-conditions
+#| include: false
+
+# Aggregate 3 scoring repeats to per-persona × condition means
+n_surviving     <- n_distinct(d$uuid)
+expected_rows   <- n_surviving * length(CONDITIONS)
+
+d_conditions <- d |>
+  group_by(uuid, condition) |>
+  summarise(
+    text_count   = first(text_count),
+    target_words = first(target_words),
+    actual_words = mean(actual_words, na.rm = TRUE),  # mean across repeats (pool varies per text_count)
+    across(c(llm_aut, llm_com, llm_rel), \(x) mean(x, na.rm = TRUE), .names = "{.col}_m"),
+    n_valid      = sum(!is.na(llm_aut)),
+    .groups      = "drop"
+  )
+
+stopifnot("d_conditions row count mismatch" = nrow(d_conditions) == expected_rows)
+message("d_conditions created: ", nrow(d_conditions), " rows (", n_surviving,
+        " personas × ", length(CONDITIONS), " conditions).")
+```
+
+---
+
+# 6 Descriptives: Demographics
+
+## 6.1 Age
+
+```{r}
+#| label: tbl-age-dist
+#| echo: false
+#| tbl-cap: "Distribution of AI Surrogates by Age Bracket"
+
+persona_stats <- d_persona |>
+  summarise(
+    Mean_Age = mean(age_mid, na.rm = TRUE),
+    SD_Age   = sd(age_mid,   na.rm = TRUE),
+    Min_Age  = min(age_low,  na.rm = TRUE),
+    Max_Age  = max(age_high, na.rm = TRUE)
+  )
+
+tbl_age_dist <- d_persona |>
+  count(age_bracket, decade_start) |>
+  arrange(decade_start) |>
+  dplyr::select(`Age Bracket` = age_bracket, n) |>
+  mutate(pct = scales::percent(n / sum(n), accuracy = 0.1)) |>
+  janitor::adorn_totals("row") |>
+  as_tibble() |>
+  mutate(pct = if_else(`Age Bracket` == "Total",
+                       scales::percent(1, accuracy = 0.1), pct))
+
+tbl_age_dist |>
+  flextable() |>
+  style_apa7() |>
+  bold(i = ~ `Age Bracket` == "Total", j = c("n", "pct")) |>
+  set_header_labels(pct = "%") |>
+  add_apa_note(sprintf(
+    "Mean age (midpoint estimate) = %.1f years (SD = %.1f; range: %d–%d).",
+    persona_stats$Mean_Age, persona_stats$SD_Age,
+    as.integer(persona_stats$Min_Age), as.integer(persona_stats$Max_Age)
+  ))
+```
+
+## 6.2 Gender
+
+```{r}
+#| label: tbl-gender-dist
+#| echo: false
+#| tbl-cap: "Gender Distribution of AI Surrogate Sample"
+
+d_persona |>
+  count(Gender = gender) |>
+  janitor::adorn_totals("row") |>
+  mutate(pct = scales::percent(n / sum(n[Gender != "Total"]), accuracy = 0.1)) |>
+  flextable() |>
+  style_apa7() |>
+  bold(i = ~ Gender == "Total", j = c("n", "pct")) |>
+  set_header_labels(pct = "%")
+```
+
+## 6.3 Education
+
+```{r}
+#| label: setup-education-clean
+#| include: false
+
+d_persona <- d_persona |>
+  mutate(education_clean = case_match(
+    trimws(tolower(education)),
+    c("high school", "highschool")   ~ "High School",
+    c("some college", "somecollege") ~ "Some College",
+    c("associate's", "associates")   ~ "Associate's",
+    c("bachelor's", "bachelors")     ~ "Bachelor's",
+    c("master's", "masters")         ~ "Master's",
+    c("doctorate", "phd")            ~ "Doctorate",
+    .default = "Other"
+  )) |>
+  mutate(education_clean = factor(education_clean, levels = edu_levels))
+
+if (any(is.na(d_persona$education_clean))) {
+  warning("Unmapped strings detected in education field.")
+}
+```
+
+```{r}
+#| label: tbl-education-dist
+#| echo: false
+#| tbl-cap: "Education Level Distribution of AI Surrogate Sample"
+
+d_persona |>
+  count(Education = education_clean) |>
+  janitor::adorn_totals("row") |>
+  mutate(pct = scales::percent(n / sum(n[Education != "Total"]), accuracy = 0.1)) |>
+  flextable() |>
+  style_apa7() |>
+  bold(i = ~ Education == "Total", j = c("n", "pct")) |>
+  set_header_labels(Education = "Education Level", pct = "%")
+```
+
+---
+
+# 7 Descriptives: Textual Properties
+
+## 7.1 Word Counts by Condition
+
+```{r}
+#| label: tbl-wordcount-by-condition
+#| echo: false
+#| tbl-cap: "Descriptive Statistics for Actual Word Counts by Experimental Condition"
+
+tbl_word_count_by_condition <- d |>
+  group_by(Condition = condition, `Target (w)` = target_words,
+           `Texts (n)` = text_count) |>
+  summarise(
+    M   = round(mean(actual_words, na.rm = TRUE), 1),
+    SD  = round(sd(actual_words,   na.rm = TRUE), 1),
+    Min = min(actual_words,  na.rm = TRUE),
+    Max = max(actual_words,  na.rm = TRUE),
+    n   = n(),
+    .groups = "drop"
+  )
+
+tbl_word_count_by_condition |>
+  flextable() |>
+  style_apa7() |>
+  add_apa_note("Word count is per text (single text per row). N reflects all rows per condition across repeats.")
+```
+
+## 7.2 Truncation Compliance
+
+```{r}
+#| label: tbl-truncation-audit
+#| echo: false
+#| tbl-cap: "Text Length Compliance by Target Word Count (75% Threshold)"
+
+d |>
+  group_by(`Target (w)` = target_words) |>
+  summarise(
+    `Planned (N)` = n(),
+    `Failed (n)`  = sum(actual_words < (target_words * TEXT_TRUNC_THRESHOLD), na.rm = TRUE),
+    `Compliant (n)` = `Planned (N)` - `Failed (n)`,
+    `Compliance (%)` = scales::percent(`Compliant (n)` / `Planned (N)`, accuracy = 0.1),
+    .groups = "drop"
+  ) |>
+  flextable() |>
+  style_apa7() |>
+  add_apa_note(paste0("Compliance = actual_words ≥ ", TEXT_TRUNC_THRESHOLD * 100,
+                      "% of target. N aggregated across text-count variants and repeats."))
+```
+
+---
+
+# 8 Descriptives: Questionnaire Scores
+
+## 8.1 Item-Level Statistics
+
+```{r}
+#| label: tbl-q-items
+#| echo: false
+#| tbl-cap: "Questionnaire Item-Level Descriptives (AI Surrogate Sample)"
+
+q_item_stats <- d_persona |>
+  dplyr::select(q_aut_1:q_rel_4) |>
+  summarise(across(everything(), list(
+    M  = \(x) round(mean(x,   na.rm = TRUE), 2),
+    SD = \(x) round(sd(x,     na.rm = TRUE), 2),
+    Md = \(x) round(median(x, na.rm = TRUE), 2),
+    n  = \(x) sum(!is.na(x))
+  ))) |>
+  tidyr::pivot_longer(everything(),
+    names_to  = c("item", ".value"),
+    names_sep = "_(?=[^_]+$)"
+  ) |>
+  mutate(
+    Subscale = case_when(
+      startsWith(item, "q_aut") ~ TABLE_LABEL_AUT,
+      startsWith(item, "q_com") ~ TABLE_LABEL_COM,
+      startsWith(item, "q_rel") ~ TABLE_LABEL_REL
+    ),
+    Item = sub("^q_", "", item)
+  ) |>
+  dplyr::select(Subscale, Item, M, SD, Md, n)
+
+q_item_stats |>
+  flextable() |>
+  style_apa7() |>
+  add_apa_note(paste0("N = ", nrow(d_persona), " AI surrogates. Items scored 1–5."))
+```
+
+## 8.2 Composite Means by Need
+
+```{r}
+#| label: tbl-q-composites
+#| echo: false
+#| tbl-cap: "Questionnaire Composite Score Descriptives by Need Dimension"
+
+q_comp_stats <- d_persona |>
+  dplyr::select(q_aut_mean, q_com_mean, q_rel_mean) |>
+  tidyr::pivot_longer(everything(), names_to = "subscale", values_to = "score") |>
+  mutate(subscale = case_match(subscale,
+    "q_aut_mean" ~ TABLE_LABEL_AUT,
+    "q_com_mean" ~ TABLE_LABEL_COM,
+    "q_rel_mean" ~ TABLE_LABEL_REL
+  )) |>
+  group_by(subscale) |>
+  summarise(
+    M   = round(mean(score,   na.rm = TRUE), 2),
+    SD  = round(sd(score,     na.rm = TRUE), 2),
+    Md  = round(median(score, na.rm = TRUE), 2),
+    Min = round(min(score,    na.rm = TRUE), 2),
+    Max = round(max(score,    na.rm = TRUE), 2),
+    n   = sum(!is.na(score)),
+    .groups = "drop"
+  )
+
+q_comp_stats |>
+  rename(!!LABEL_NEEDS := subscale) |>
+  flextable() |>
+  style_apa7() |>
+  add_apa_note(paste0("N = ", nrow(d_persona), " AI surrogates. Composite = mean of 4 items per need."))
+```
+
+## 8.3 Norms Comparison (Olafsen et al., 2021)
+
+```{r}
+#| label: tbl-norm-comparison
+#| echo: false
+#| tbl-cap: "Comparison of AI Surrogate Questionnaire Scores with Human Norms (Olafsen et al., 2021)"
+
+# Olafsen et al. (2021), Sample 4 (N = 393), rescaled from 1–7 to 1–5
+olafsen_norms <- tribble(
+  ~subscale,    ~norm_m, ~norm_sd,
+  "autonomy",     3.52,     0.59,
+  "competence",   3.86,     0.56,
+  "relatedness",  3.76,     0.63
+)
+
+tbl_norm_comp <- olafsen_norms |>
+  left_join(q_comp_stats |>
+              mutate(subscale = tolower(case_match(subscale,
+                TABLE_LABEL_AUT ~ "autonomy",
+                TABLE_LABEL_COM ~ "competence",
+                TABLE_LABEL_REL ~ "relatedness"
+              ))), by = "subscale") |>
+  mutate(
+    `Delta M`  = round(M - norm_m,  2),
+    `Delta SD` = round(SD - norm_sd, 2),
+    subscale   = tools::toTitleCase(subscale)
+  ) |>
+  dplyr::select(
+    `Need Dimension` = subscale,
+    `Norm M`         = norm_m,
+    `Norm SD`        = norm_sd,
+    `Surrogate M`    = M,
+    `Surrogate SD`   = SD,
+    `Delta M`, `Delta SD`
+  )
+
+tbl_norm_comp |>
+  flextable() |>
+  style_apa7() |>
+  add_apa_note(paste0(
+    "Norms from Olafsen et al. (2021), Sample 4 (N = 393), rescaled from 1–7 to 1–5 scale. ",
+    "AI Surrogate N = ", nrow(d_persona), "."
+  ))
+```
+
+---
+
+# 9 Descriptives: LLM Scores
+
+## 9.1 LLM Score Distributions by Condition
+
+```{r}
+#| label: tbl-llm-by-condition
+#| echo: false
+#| tbl-cap: "LLM Score Descriptives by Condition and Need Dimension (Surrogate-Level Means)"
+
+d_conditions |>
+  tidyr::pivot_longer(c(llm_aut_m, llm_com_m, llm_rel_m),
+                      names_to = "need", values_to = "score") |>
+  mutate(need = case_match(need,
+    "llm_aut_m" ~ TABLE_LABEL_AUT,
+    "llm_com_m" ~ TABLE_LABEL_COM,
+    "llm_rel_m" ~ TABLE_LABEL_REL
+  )) |>
+  group_by(Condition = condition, Need = need) |>
+  summarise(
+    M   = round(mean(score, na.rm = TRUE), 2),
+    SD  = round(sd(score,   na.rm = TRUE), 2),
+    Min = round(min(score,  na.rm = TRUE), 2),
+    Max = round(max(score,  na.rm = TRUE), 2),
+    n   = n(),
+    .groups = "drop"
+  ) |>
+  flextable() |>
+  style_apa7() |>
+  add_apa_note(paste0("N per condition = ", n_surviving, " AI surrogates. ",
+                      "Scores = mean of 3 scoring repeats per persona."))
+```
+
+## 9.2 LLM Score Distribution — Boxplots by Condition
+
+```{r}
+#| label: fig-llm-condition-boxplot
+#| echo: false
+#| fig-cap: "LLM Score Distributions by Condition and Need Dimension (Surrogate-Level Means). Each box represents one experimental condition (target word length × number of texts)."
+#| fig-width: 9
+#| fig-height: 5
+#| fig-dpi: 300
+
+d_conditions |>
+  tidyr::pivot_longer(c(llm_aut_m, llm_com_m, llm_rel_m),
+                      names_to = "need", values_to = "score") |>
+  mutate(need = case_match(need,
+    "llm_aut_m" ~ TABLE_LABEL_AUT,
+    "llm_com_m" ~ TABLE_LABEL_COM,
+    "llm_rel_m" ~ TABLE_LABEL_REL
+  )) |>
+  ggplot(aes(x = condition, y = score, fill = need)) +
+  geom_boxplot(alpha = 0.7, outlier.size = 0.8) +
+  scale_fill_manual(values = COL_AI_LLM, name = "Need") +
+  scale_x_discrete(guide = guide_axis(angle = 45)) +
+  labs(x = "Condition", y = "LLM Score (1–5)") +
+  theme_thesis()
+```
+
+## 9.3 LLM vs Questionnaire Score Overlay
+
+```{r}
+#| label: fig-llm-q-overlay
+#| echo: false
+#| fig-cap: "LLM vs Questionnaire Score Distributions by Need Dimension. Blue = LLM scores; gray = questionnaire scores."
+#| fig-width: 8
+#| fig-height: 4
+#| fig-dpi: 300
+
+overlay_data <- bind_rows(
+  d_conditions |>
+    dplyr::select(uuid, condition, llm_aut_m, llm_com_m, llm_rel_m) |>
+    tidyr::pivot_longer(c(llm_aut_m, llm_com_m, llm_rel_m),
+                        names_to = "need", values_to = "score") |>
+    mutate(
+      source = "LLM",
+      need   = case_match(need,
+        "llm_aut_m" ~ TABLE_LABEL_AUT,
+        "llm_com_m" ~ TABLE_LABEL_COM,
+        "llm_rel_m" ~ TABLE_LABEL_REL
+      )
+    ),
+  d_persona |>
+    dplyr::select(uuid, q_aut_mean, q_com_mean, q_rel_mean) |>
+    tidyr::pivot_longer(c(q_aut_mean, q_com_mean, q_rel_mean),
+                        names_to = "need", values_to = "score") |>
+    mutate(
+      source = "Questionnaire",
+      need   = case_match(need,
+        "q_aut_mean" ~ TABLE_LABEL_AUT,
+        "q_com_mean" ~ TABLE_LABEL_COM,
+        "q_rel_mean" ~ TABLE_LABEL_REL
+      )
+    )
+)
+
+ggplot(overlay_data, aes(x = score, fill = source)) +
+  geom_density(alpha = 0.5) +
+  facet_wrap(~need, ncol = 3) +
+  scale_fill_manual(values = c(LLM = COL_AI_SINGLE, Questionnaire = COL_NEUTRAL_SINGLE),
+                    name = "Measure") +
+  labs(x = "Score (1–5)", y = "Density") +
+  theme_thesis()
+```
+
+---
+
+# 10 Reliability
+
+## 10.1 Questionnaire Reliability (Cronbach Alpha / Omega)
+
+```{r}
+#| label: tbl-reliability-omega
+#| echo: false
+#| cache: true
+#| cache.extra: !expr file.mtime(data_path)
+#| tbl-cap: "Internal Consistency of Questionnaire Subscales (Cronbach's Alpha and McDonald's Omega)"
+
+omega_aut <- psych::omega(d_persona |> dplyr::select(q_aut_1:q_aut_4), plot = FALSE)
+omega_com <- psych::omega(d_persona |> dplyr::select(q_com_1:q_com_4), plot = FALSE)
+omega_rel <- psych::omega(d_persona |> dplyr::select(q_rel_1:q_rel_4), plot = FALSE)
+
+alpha_aut <- psych::alpha(d_persona |> dplyr::select(q_aut_1:q_aut_4))$total$raw_alpha
+alpha_com <- psych::alpha(d_persona |> dplyr::select(q_com_1:q_com_4))$total$raw_alpha
+alpha_rel <- psych::alpha(d_persona |> dplyr::select(q_rel_1:q_rel_4))$total$raw_alpha
+
+tbl_reliability <- tibble::tibble(
+  Need  = NEEDS,
+  Items = 4L,
+  Alpha = round(c(alpha_aut, alpha_com, alpha_rel), 2),
+  Omega = round(c(omega_aut$omega.tot, omega_com$omega.tot, omega_rel$omega.tot), 2)
+)
+
+tbl_reliability |>
+  flextable() |>
+  style_apa7() |>
+  add_apa_note(paste0("N = ", nrow(d_persona), ". Alpha = Cronbach's alpha (raw). ",
+                      "Omega = McDonald's omega (total). Items scored 1–5."))
+```
+
+## 10.2 LLM Scoring Reliability — ICC(2,1) and ICC(2,3)
+
+ICC(2,1) characterises single-draw reliability; ICC(2,3) characterises the
+reliability of the mean across k = 3 scoring repeats, which is the
+quantity used in all downstream analyses. In a small number of condition × need
+cells the underlying lme4 model hit the parameter boundary (random-effect
+variance estimated at zero), which is expected when ICC approaches its theoretical
+limits and does not affect the reported values.
+
+```{r}
+#| label: tbl-llm-icc-results
+#| echo: false
+#| warning: false
+#| cache: true
+#| cache.extra: !expr file.mtime(data_path)
+#| tbl-cap: "LLM Scoring Reliability: ICC(2,1) — Two-Way Random Effects, Absolute Agreement, Single Measures"
+
+calc_condition_icc <- function(sub_data, score_var) {
+  wide_reps <- sub_data |>
+    dplyr::select(uuid, repeat_id, all_of(score_var)) |>
+    filter(!is.na(.data[[score_var]])) |>
+    tidyr::pivot_wider(names_from = repeat_id, names_prefix = "rep",
+                       values_from = all_of(score_var))
+
+  n_expected <- n_distinct(sub_data$uuid)
+  if (nrow(wide_reps) != n_expected) {
+    warning("ICC pivot: expected ", n_expected, " rows, got ", nrow(wide_reps),
+            " for ", score_var)
+  }
+
+  icc_out <- psych::ICC(wide_reps |> dplyr::select(starts_with("rep")),
+                        missing = TRUE)
+
+  icc2  <- icc_out$results |> filter(type == "ICC2")
+  icc2k <- icc_out$results |> filter(type == "ICC2k")
+
+  list(
+    icc2_val  = icc2$ICC,   icc2_lo  = icc2$`lower bound`,  icc2_hi  = icc2$`upper bound`,
+    icc2k_val = icc2k$ICC, icc2k_lo = icc2k$`lower bound`, icc2k_hi = icc2k$`upper bound`
+  )
+}
+
+conditions_grid <- d |>
+  distinct(condition, target_words, text_count) |>
+  arrange(condition)
+
+tbl_icc_raw <- purrr::map_dfr(seq_len(nrow(conditions_grid)), function(i) {
+  cond <- conditions_grid$condition[i]
+  sub  <- d |> filter(condition == cond)
+  purrr::map_dfr(c("llm_aut", "llm_com", "llm_rel"), function(sv) {
+    stats <- calc_condition_icc(sub, sv)
+    tibble::tibble(
+      Condition = as.character(cond), Need = sv,
+      ICC    = stats$icc2_val,
+      CI_lo  = stats$icc2_lo,
+      CI_hi  = stats$icc2_hi
+    )
+  })
+})
+
+tbl_icc_raw |>
+  mutate(
+    Need   = case_match(Need, "llm_aut" ~ TABLE_LABEL_AUT,
+                               "llm_com" ~ TABLE_LABEL_COM,
+                               "llm_rel" ~ TABLE_LABEL_REL),
+    Result = sprintf("%.2f [%.2f, %.2f]", ICC, CI_lo, CI_hi)
+  ) |>
+  dplyr::select(Condition, Need, Result) |>
+  tidyr::pivot_wider(names_from = Need, values_from = Result) |>
+  flextable() |>
+  style_apa7() |>
+  add_header_row(
+    values     = c("", "ICC(2,1) [95% CI]"),
+    colwidths  = c(1, 3)
+  ) |>
+  align(i = 1, align = "center", part = "header") |>
+  add_apa_note(paste0(
+    "Two-way random effects model, absolute agreement, single measures. ",
+    "Computed via psych::ICC with missing = TRUE."
+  ))
+```
+
+```{r}
+#| label: tbl-llm-icc2k-results
+#| echo: false
+#| warning: false
+#| cache: true
+#| cache.extra: !expr file.mtime(data_path)
+#| tbl-cap: "LLM Scoring Reliability: ICC(2,3) — Two-Way Random Effects, Absolute Agreement, Average of k = 3 Measures"
+
+tbl_icc2k_raw <- purrr::map_dfr(seq_len(nrow(conditions_grid)), function(i) {
+  cond <- conditions_grid$condition[i]
+  sub  <- d |> filter(condition == cond)
+  purrr::map_dfr(c("llm_aut", "llm_com", "llm_rel"), function(sv) {
+    stats <- calc_condition_icc(sub, sv)
+    tibble::tibble(
+      Condition = as.character(cond), Need = sv,
+      ICC    = stats$icc2k_val,
+      CI_lo  = stats$icc2k_lo,
+      CI_hi  = stats$icc2k_hi
+    )
+  })
+})
+
+# Reliability alert (Layer C)
+low_reliability <- tbl_icc_raw |> filter(ICC < 0.75)
+if (nrow(low_reliability) > 0) {
+  message("Reliability Alert: ", nrow(low_reliability),
+          " condition × need cell(s) with ICC(2,1) < .75:")
+  print(low_reliability)
+} else {
+  message("Reliability OK: All ICC(2,1) values ≥ .75.")
+}
+
+tbl_icc2k_raw |>
+  mutate(
+    Need   = case_match(Need, "llm_aut" ~ TABLE_LABEL_AUT,
+                               "llm_com" ~ TABLE_LABEL_COM,
+                               "llm_rel" ~ TABLE_LABEL_REL),
+    Result = sprintf("%.2f [%.2f, %.2f]", ICC, CI_lo, CI_hi)
+  ) |>
+  dplyr::select(Condition, Need, Result) |>
+  tidyr::pivot_wider(names_from = Need, values_from = Result) |>
+  flextable() |>
+  style_apa7() |>
+  add_header_row(
+    values     = c("", "ICC(2,3) [95% CI]"),
+    colwidths  = c(1, 3)
+  ) |>
+  align(i = 1, align = "center", part = "header") |>
+  add_apa_note(paste0(
+    "Two-way random effects model, absolute agreement, average of k = 3 measures (Shrout & Fleiss ICC(2,k)). ",
+    "The three scoring repeats are treated as exchangeable raters. ",
+    "ICC(2,3) reflects reliability of the mean score used in downstream analyses."
+  ))
+```
+
+## 10.3 CFA on Questionnaire Items (1-Factor vs 3-Factor)
+
+We fit a 1-factor (general valence) and 3-factor (SDT need structure) CFA on the
+12 questionnaire items (one row per persona) and compare fit indices. The
+chi-square difference test between these models is an approximation: strict
+nesting would require constraining the 3-factor inter-factor correlations to 1.0;
+the LRT here serves as a descriptive comparison of fit improvement only.
+
+```{r}
+#| label: validate-q-cfa
+#| include: false
+#| message: false
+
+q_model_1f <- '
+  General =~ q_aut_1 + q_aut_2 + q_aut_3 + q_aut_4 +
+             q_com_1 + q_com_2 + q_com_3 + q_com_4 +
+             q_rel_1 + q_rel_2 + q_rel_3 + q_rel_4
+'
+
+q_model_3f <- '
+  Autonomy    =~ q_aut_1 + q_aut_2 + q_aut_3 + q_aut_4
+  Competence  =~ q_com_1 + q_com_2 + q_com_3 + q_com_4
+  Relatedness =~ q_rel_1 + q_rel_2 + q_rel_3 + q_rel_4
+'
+
+fit_1f <- lavaan::cfa(q_model_1f, data = d_persona)
+fit_3f <- lavaan::cfa(q_model_3f, data = d_persona)
+
+idx_names <- c("chisq", "df", "pvalue", "cfi", "rmsea", "srmr")
+fi_1f <- lavaan::fitmeasures(fit_1f, idx_names)
+fi_3f <- lavaan::fitmeasures(fit_3f, idx_names)
+
+tbl_cfa_fit <- rbind(`1-factor` = round(fi_1f, 3),
+                     `3-factor` = round(fi_3f, 3)) |>
+  as.data.frame() |>
+  tibble::rownames_to_column("Model")
+
+lrt_cfa <- lavaan::lavTestLRT(fit_1f, fit_3f)
+
+cat("LRT chi-square difference (3-factor vs 1-factor, approximation):\n")
+print(lrt_cfa)
+```
+
+```{r}
+#| label: tbl-cfa-fit
+#| echo: false
+#| tbl-cap: "CFA Model Fit: 1-Factor vs 3-Factor Questionnaire Structure"
+
+tbl_cfa_fit |>
+  flextable() |>
+  set_header_labels(chisq = "chi-sq", pvalue = "p", cfi = "CFI",
+                    rmsea = "RMSEA", srmr = "SRMR") |>
+  style_apa7() |>
+  add_apa_note(paste0(
+    "N = ", nrow(d_persona), " AI surrogates. ",
+    "Chi-square difference test between models is an approximation (models are not ",
+    "strictly nested without constraining 3-factor inter-correlations to 1.0)."
+  ))
+```
+
+---
+
+# 11 Exports
+
+```{r}
+#| label: export-all
+#| include: false
+
+# d_rq2_clean: long form, N_personas x 27 rows (9 conditions x 3 repeats)
+# contains raw llm_aut/com/rel per repeat, questionnaire items, condition factor,
+# q_aut/com/rel_mean composites, and age_mid/age_bracket derived columns
+d_rq2_clean <- d
+saveRDS(d_rq2_clean,
+        file.path(EXPORT_DIR, "d_rq2_clean.rds"))
+message("Exported: d_rq2_clean.rds (", nrow(d_rq2_clean), " rows)")
+
+# d_rq3_ai: single matched condition (short-3) for human merge
+RQ3_EXPORT_CONDITION <- "short-3"
+stopifnot("RQ3 export condition not found" =
+            RQ3_EXPORT_CONDITION %in% d_conditions$condition)
+
+d_rq3_ai <- d_conditions |>
+  filter(condition == RQ3_EXPORT_CONDITION) |>
+  left_join(d_persona |> dplyr::select(uuid, q_aut_mean, q_com_mean, q_rel_mean),
+            by = "uuid") |>
+  mutate(id_type = "AI") |>
+  rename(id = uuid, llm_aut_mean = llm_aut_m,
+         llm_com_mean = llm_com_m, llm_rel_mean = llm_rel_m) |>
+  dplyr::select(id, id_type, llm_aut_mean, llm_com_mean, llm_rel_mean,
+                q_aut_mean, q_com_mean, q_rel_mean, actual_words,
+                condition, text_count, target_words)
+
+saveRDS(d_rq3_ai, file.path(EXPORT_DIR, "d_rq3_ai.rds"))
+message("Exported: d_rq3_ai.rds (", nrow(d_rq3_ai), " rows, condition = ",
+        RQ3_EXPORT_CONDITION, ")")
+rm(d_rq3_ai)
+
+# d_rq3_ai_conditions: all 9 conditions (for RQ2 analyses and additional analyses)
+d_rq3_ai_conditions <- d_conditions |>
+  left_join(d_persona |> dplyr::select(uuid, q_aut_mean, q_com_mean, q_rel_mean),
+            by = "uuid") |>
+  mutate(id_type = "AI") |>
+  rename(id = uuid, llm_aut_mean = llm_aut_m,
+         llm_com_mean = llm_com_m, llm_rel_mean = llm_rel_m) |>
+  dplyr::select(id, id_type, llm_aut_mean, llm_com_mean, llm_rel_mean,
+                q_aut_mean, q_com_mean, q_rel_mean, actual_words,
+                condition, text_count, target_words)
+
+saveRDS(d_rq3_ai_conditions, file.path(EXPORT_DIR, "d_rq3_ai_conditions.rds"))
+message("Exported: d_rq3_ai_conditions.rds (", nrow(d_rq3_ai_conditions), " rows, all 9 conditions)")
+rm(d_rq3_ai_conditions)
+
+# tbl_icc_raw and tbl_icc2k_raw (computed in cached chunks above)
+saveRDS(tbl_icc_raw,   file.path(EXPORT_DIR, "tbl_icc_raw.rds"))
+saveRDS(tbl_icc2k_raw, file.path(EXPORT_DIR, "tbl_icc2k_raw.rds"))
+message("Exported: tbl_icc_raw.rds, tbl_icc2k_raw.rds")
+
+# tbl_word_count_by_condition: raw tibble (not the flextable)
+tbl_word_count_rds <- d |>
+  dplyr::group_by(condition, target_words, text_count) |>
+  dplyr::summarise(
+    mean_words = mean(actual_words, na.rm = TRUE),
+    sd_words   = sd(actual_words,   na.rm = TRUE),
+    n          = dplyr::n(),
+    .groups    = "drop"
+  )
+saveRDS(tbl_word_count_rds, file.path(EXPORT_DIR, "tbl_word_count_by_condition.rds"))
+message("Exported: tbl_word_count_by_condition.rds")
+
+message("All exports complete.")
+```
+
+---
+
+# 12 Session Info
+
+```{r}
+#| label: session-info
+#| include: false
+
+sessionInfo()
+```

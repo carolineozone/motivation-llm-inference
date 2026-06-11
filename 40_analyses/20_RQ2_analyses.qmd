@@ -1,0 +1,2794 @@
+---
+title: "RQ2 Analyses — Variability, Correspondence, and H1c/d (AI Surrogates)"
+subtitle: "Bootstrap CIs · BCa sensitivity · Spearman · Polychoric · Steiger · Meta-r"
+author: "Caroline Müller"
+date: "2026-05-16"
+format:
+  html:
+    code-fold: true
+    code-summary: "Show code"
+    code-tools: true
+    toc: true
+    self-contained: true
+    fig-cap-location: top
+editor:
+  markdown:
+    wrap: 72
+knitr:
+  opts_chunk:
+    dpi: 300
+---
+
+# 1 Overview
+
+**Prerequisite:** Run `10_RQ2_data.qmd` first to generate the required
+RDS exports in `10_data/80_analyses_exports/`.
+
+This file covers all inferential RQ2 analyses:
+
+- **RQ2a** Between-surrogate variability (SD) across 9 conditions
+- **RQ2b** LLM–questionnaire correspondence (Pearson r) + Spearman + Polychoric robustness
+- **BCa sensitivity** checks for SD and r (bounded/skewed distributions)
+- **H1c** Discriminant validity — Steiger's test, AI surrogates, all 9 conditions
+- **H1d** Structural consistency — meta-r, AI surrogates, all 9 conditions
+
+**Primary CIs:** Bootstrap percentile, R = 10,000.
+**Sensitivity CIs:** BCa (bias-corrected accelerated); divergence threshold = 0.02.
+
+---
+
+# 2 Setup
+
+## 2.1 Environment
+
+```{r}
+#| label: setup-environment
+#| include: false
+#| warning: false
+
+graphics.off()
+
+suppressPackageStartupMessages({
+  library(dplyr)
+  library(ggplot2)
+  library(tidyr)
+  library(flextable)
+  library(scales)
+  library(psych)
+  library(officer)
+  library(janitor)
+  library(systemfonts)
+  library(ragg)
+  library(purrr)
+  library(boot)
+  library(cocor)
+  library(cowplot)
+})
+
+knitr::opts_chunk$set(dev = "ragg_png", warning = FALSE)
+if (.Platform$OS.type == "windows") windowsFonts(Calibri = windowsFont("Calibri"))
+
+message("Libraries loaded.")
+```
+
+## 2.2 Shared Constants
+
+```{r}
+#| label: setup-common
+#| include: false
+
+source("00_common.R")
+```
+
+## 2.3 Load Upstream Exports
+
+```{r}
+#| label: setup-imports
+#| include: false
+
+EXPORT_DIR <- "../10_data/80_analyses_exports"
+
+rds_paths <- list(
+  ai_cond = file.path(EXPORT_DIR, "d_rq3_ai_conditions.rds")
+)
+
+for (nm in names(rds_paths)) {
+  if (!file.exists(rds_paths[[nm]])) {
+    stop("Missing upstream export — run 10_RQ2_data.qmd first: ", rds_paths[[nm]])
+  }
+}
+
+d_rq3_ai_conditions <- readRDS(rds_paths$ai_cond)
+
+message("Imports loaded: ", nrow(d_rq3_ai_conditions), " rows, ",
+        n_distinct(d_rq3_ai_conditions$id), " AI surrogates.")
+```
+
+## 2.4 Pivot to Wide Format for RQ2
+
+```{r}
+#| label: setup-wide-rq2
+#| include: false
+
+# One row per persona: LLM condition scores wide + Q composites
+wide_rq2 <- d_rq3_ai_conditions |>
+  dplyr::select(id, condition, llm_aut_mean, llm_com_mean, llm_rel_mean) |>
+  tidyr::pivot_wider(
+    names_from  = condition,
+    values_from = c(llm_aut_mean, llm_com_mean, llm_rel_mean)
+  ) |>
+  left_join(
+    d_rq3_ai_conditions |> distinct(id, q_aut_mean, q_com_mean, q_rel_mean),
+    by = "id"
+  )
+
+stopifnot(
+  "wide_rq2: one row per persona" =
+    nrow(wide_rq2) == n_distinct(d_rq3_ai_conditions$id),
+  "wide_rq2: no duplicate ids" =
+    !anyDuplicated(wide_rq2$id)
+)
+
+# Column name vectors for bootstrap functions
+aut_cols <- paste0("llm_aut_mean_", CONDITIONS)
+com_cols <- paste0("llm_com_mean_", CONDITIONS)
+rel_cols <- paste0("llm_rel_mean_", CONDITIONS)
+
+stopifnot(
+  "all LLM condition columns present" =
+    all(c(aut_cols, com_cols, rel_cols) %in% names(wide_rq2))
+)
+
+# condition_lookup for joins
+condition_lookup <- tibble::tibble(
+  condition    = CONDITIONS,
+  target_words = rep(as.integer(WORD_LENGTH_VARIANTS), each = length(N_TEXTS_VARIANTS)),
+  text_count   = rep(N_TEXTS_VARIANTS, times = length(WORD_LENGTH_VARIANTS))
+)
+
+wide_rq2_df <- as.data.frame(wide_rq2)
+message("wide_rq2 created: ", nrow(wide_rq2), " personas × ", length(CONDITIONS), " conditions.")
+```
+
+---
+
+# 3 RQ2a — Between-Surrogate Variability (SD)
+
+RQ2a asks: to what extent do text length and number of texts affect
+between-surrogate variability (SD) in LLM scores?
+
+## 3.1 Bootstrap SD
+
+Resampling unit: personas. SD computed per condition × need on each
+bootstrap resample. 10,000 iterations, set.seed(2026).
+
+```{r}
+#| label: boot-sd-rq2
+#| include: false
+#| cache: true
+#| cache.extra: !expr list(file.mtime(rds_paths$ai_cond), BOOTSTRAP_SAMPLES)
+
+boot_fn_sd <- function(data, indices) {
+  d <- data[indices, ]
+  c(
+    setNames(vapply(aut_cols, function(col) sd(d[[col]], na.rm = TRUE), numeric(1L)),
+             paste0("aut_", CONDITIONS)),
+    setNames(vapply(com_cols, function(col) sd(d[[col]], na.rm = TRUE), numeric(1L)),
+             paste0("com_", CONDITIONS)),
+    setNames(vapply(rel_cols, function(col) sd(d[[col]], na.rm = TRUE), numeric(1L)),
+             paste0("rel_", CONDITIONS))
+  )
+}
+
+set.seed(2026)
+boot_sd_rq2 <- boot::boot(data = wide_rq2_df, statistic = boot_fn_sd,
+                           R = BOOTSTRAP_SAMPLES)
+colnames(boot_sd_rq2$t) <- names(boot_sd_rq2$t0)
+
+saveRDS(boot_sd_rq2, file.path(EXPORT_DIR, "boot_sd_rq2.rds"))
+message("boot_sd_rq2 complete and saved.")
+```
+
+```{r}
+#| label: boot-mean-rq2
+#| include: false
+#| cache: true
+#| cache.extra: !expr list(file.mtime(rds_paths$ai_cond), BOOTSTRAP_SAMPLES)
+
+boot_fn_mean <- function(data, indices) {
+  d <- data[indices, ]
+  c(
+    setNames(vapply(aut_cols, function(col) mean(d[[col]], na.rm = TRUE), numeric(1L)),
+             paste0("aut_", CONDITIONS)),
+    setNames(vapply(com_cols, function(col) mean(d[[col]], na.rm = TRUE), numeric(1L)),
+             paste0("com_", CONDITIONS)),
+    setNames(vapply(rel_cols, function(col) mean(d[[col]], na.rm = TRUE), numeric(1L)),
+             paste0("rel_", CONDITIONS))
+  )
+}
+
+set.seed(2026)
+boot_mean_rq2 <- boot::boot(data = wide_rq2_df, statistic = boot_fn_mean,
+                             R = BOOTSTRAP_SAMPLES)
+colnames(boot_mean_rq2$t) <- names(boot_mean_rq2$t0)
+message("boot_mean_rq2 complete.")
+```
+
+## 3.2 BCa Sensitivity Check — SD
+
+```{r}
+#| label: check-bca-sd-rq2
+#| include: false
+
+# BCa CIs are computed for all 27 SD values and compared to percentile CIs.
+# Divergence threshold = 0.02 (absolute difference on the SD scale).
+# Results stored in check_bca_divergence_sd; not shown in primary tables.
+
+bca_sd_results <- purrr::map_dfr(
+  list(list(prefix = "aut", label = TABLE_LABEL_AUT),
+       list(prefix = "com", label = TABLE_LABEL_COM),
+       list(prefix = "rel", label = TABLE_LABEL_REL)),
+  function(x) {
+    purrr::map_dfr(seq_along(CONDITIONS), function(j) {
+      col_name <- paste0(x$prefix, "_", CONDITIONS[j])
+      idx      <- which(names(boot_sd_rq2$t0) == col_name)
+      perc_ci  <- boot::boot.ci(boot_sd_rq2, index = idx, type = "perc")$percent[4:5]
+      bca_ci   <- tryCatch(
+        boot::boot.ci(boot_sd_rq2, index = idx, type = "bca")$bca[4:5],
+        error = function(e) c(NA_real_, NA_real_)
+      )
+      tibble::tibble(
+        need = x$label, condition = CONDITIONS[j],
+        perc_lo = perc_ci[1], perc_hi = perc_ci[2],
+        bca_lo  = bca_ci[1],  bca_hi  = bca_ci[2],
+        max_diff = max(abs(bca_lo - perc_lo), abs(bca_hi - perc_hi), na.rm = TRUE)
+      )
+    })
+  }
+)
+
+check_bca_divergence_sd <- bca_sd_results |> filter(max_diff > 0.02)
+
+if (nrow(check_bca_divergence_sd) > 0) {
+  cat("BCa/percentile divergence > .02 in", nrow(check_bca_divergence_sd),
+      "SD cells:\n")
+  print(check_bca_divergence_sd)
+} else {
+  cat("BCa sensitivity check OK: all SD CIs agree within .02.\n")
+}
+```
+
+## 3.3 SD Results Table
+
+```{r}
+#| label: tbl-rq2a-sd
+#| echo: false
+#| tbl-cap: "Bootstrap SD of LLM Scores by Condition and Need Dimension (RQ2a). Percentile CIs; R = 10,000."
+
+format_rq2_matrix <- function(boot_obj, need_prefix) {
+  col_idx <- paste0(need_prefix, "_", CONDITIONS)
+  t0      <- boot_obj$t0[col_idx]
+  boot_t  <- boot_obj$t[, col_idx, drop = FALSE]
+  ci_l    <- apply(boot_t, 2L, quantile, CI_Q_LO, na.rm = TRUE)
+  ci_u    <- apply(boot_t, 2L, quantile, CI_Q_HI, na.rm = TRUE)
+
+  tibble::tibble(condition = CONDITIONS, value = sprintf("%.2f [%.2f, %.2f]", t0, ci_l, ci_u)) |>
+    dplyr::left_join(condition_lookup, by = "condition") |>
+    dplyr::mutate(text_count = factor(text_count, levels = N_TEXTS_VARIANTS)) |>
+    tidyr::pivot_wider(names_from = text_count, values_from = value) |>
+    dplyr::select(-condition) |>
+    dplyr::arrange(target_words) |>
+    dplyr::mutate(target_words = WORD_LENGTH_LABELS[as.character(target_words)])
+}
+
+bind_rows(
+  format_rq2_matrix(boot_sd_rq2, "aut") |> mutate(Need = TABLE_LABEL_AUT),
+  format_rq2_matrix(boot_sd_rq2, "com") |> mutate(Need = TABLE_LABEL_COM),
+  format_rq2_matrix(boot_sd_rq2, "rel") |> mutate(Need = TABLE_LABEL_REL)
+) |>
+  dplyr::select(Need, `Word length` = target_words, `1`, `3`, `5`) |>
+  flextable() |>
+  set_header_labels(`1` = "1 text", `3` = "3 texts", `5` = "5 texts") |>
+  style_apa7() |>
+  add_apa_note(paste0(
+    "N = ", nrow(wide_rq2), " AI surrogates. SD = between-surrogate SD per condition. ",
+    "Bootstrap percentile CIs, R = ", BOOTSTRAP_SAMPLES, ", seed = 2026. ",
+    "BCa sensitivity check: see check_bca_divergence_sd."
+  ))
+```
+
+## 3.4 SD Line Plot
+
+```{r}
+#| label: fig-rq2a-lineplot
+#| echo: false
+#| fig-cap: "Between-Surrogate SD of LLM Scores by Condition (RQ2a). Lines = number of texts; error bars = 95% percentile bootstrap CIs."
+#| fig-width: 9
+#| fig-height: 4
+#| fig-dpi: 300
+
+plot_rq2_lines <- function(boot_obj, need_prefix, y_label, ref_line = NULL) {
+  col_idx  <- paste0(need_prefix, "_", CONDITIONS)
+  boot_t   <- boot_obj$t[, col_idx, drop = FALSE]
+  plot_data <- tibble::tibble(
+    condition = CONDITIONS,
+    value     = boot_obj$t0[col_idx],
+    ci_lo     = apply(boot_t, 2L, quantile, CI_Q_LO, na.rm = TRUE),
+    ci_hi     = apply(boot_t, 2L, quantile, CI_Q_HI, na.rm = TRUE)
+  ) |>
+    dplyr::left_join(condition_lookup, by = "condition") |>
+    dplyr::mutate(text_count = factor(text_count, levels = N_TEXTS_VARIANTS))
+
+  p <- ggplot(plot_data,
+              aes(x = target_words, y = value,
+                  group = text_count, color = text_count)) +
+    geom_line(linewidth = 0.8) +
+    geom_point(size = 2.5) +
+    geom_errorbar(aes(ymin = ci_lo, ymax = ci_hi), width = 10, alpha = 0.7) +
+    scale_x_continuous(breaks = c(50L, 150L, 300L),
+                       labels = c("Short\n(50)", "Medium\n(150)", "Long\n(300)")) +
+    scale_color_manual(values = COL_AI_TEXTS, name = "Texts (n)") +
+    labs(x = "Target word length", y = y_label) +
+    theme_thesis()
+
+  if (!is.null(ref_line))
+    p <- p + geom_hline(yintercept = ref_line, linetype = "dashed",
+                        color = "grey50", linewidth = 0.5)
+  p
+}
+
+cowplot::plot_grid(
+  plot_rq2_lines(boot_sd_rq2, "aut", TABLE_LABEL_AUT),
+  plot_rq2_lines(boot_sd_rq2, "com", TABLE_LABEL_COM),
+  plot_rq2_lines(boot_sd_rq2, "rel", TABLE_LABEL_REL),
+  ncol = 3L, align = "hv"
+)
+```
+
+```{r}
+#| label: prep-fig-rq2a-data
+#| include: false
+
+fig_rq2a_data <- purrr::map_dfr(
+  list(
+    list(prefix = "aut", label = TABLE_LABEL_AUT),
+    list(prefix = "com", label = TABLE_LABEL_COM),
+    list(prefix = "rel", label = TABLE_LABEL_REL)
+  ),
+  function(x) {
+    col_idx <- paste0(x$prefix, "_", CONDITIONS)
+    boot_t  <- boot_sd_rq2$t[, col_idx, drop = FALSE]
+    tibble::tibble(
+      condition = CONDITIONS,
+      need      = x$label,
+      sd        = boot_sd_rq2$t0[col_idx],
+      ci_lo     = apply(boot_t, 2L, quantile, CI_Q_LO, na.rm = TRUE),
+      ci_hi     = apply(boot_t, 2L, quantile, CI_Q_HI, na.rm = TRUE)
+    ) |>
+      dplyr::left_join(condition_lookup, by = "condition") |>
+      dplyr::mutate(text_count = factor(text_count, levels = N_TEXTS_VARIANTS))
+  }
+) |>
+  dplyr::mutate(need = factor(need, levels = c(TABLE_LABEL_AUT, TABLE_LABEL_COM, TABLE_LABEL_REL)))
+```
+
+```{r}
+#| label: fig-rq2a-sd-lines-new
+#| echo: false
+#| fig-cap: "Between-surrogate SD of surrogate-level mean LLM scores by condition (RQ2a). Lines = number of texts (1, 3, 5); x-axis = target word length (fully independent). Error bars = 95% bootstrap CIs."
+#| fig-width: 10
+#| fig-height: 4
+#| fig-dpi: 300
+
+ggplot(fig_rq2a_data,
+       aes(x = target_words, y = sd,
+           group = text_count, color = text_count)) +
+  geom_line(linewidth = 0.8, position = DODGE) +
+  geom_point(size = 2.5, position = DODGE) +
+  geom_errorbar(aes(ymin = ci_lo, ymax = ci_hi), width = 0, alpha = 0.7, position = DODGE) +
+  facet_wrap(~need, ncol = 3L) +
+  scale_x_continuous(
+    breaks = c(50L, 150L, 300L),
+    labels = c("Short\n(50)", "Medium\n(150)", "Long\n(300)")
+  ) +
+  scale_color_manual(values = COL_AI_TEXTS) +
+  labs(
+    subtitle = paste0("N = ", nrow(wide_rq2),
+                      " AI surrogates; error bars = 95% bootstrap CIs (R = ",
+                      BOOTSTRAP_SAMPLES, ")"),
+    x     = "Target word length",
+    y     = "Between-surrogate SD",
+    color = "Texts (n)"
+  ) +
+  theme_minimal(base_size = THESIS_FONTSIZE) +
+  theme(
+    text               = element_text(family = THESIS_FONT),
+    legend.position    = "bottom",
+    strip.text         = element_text(face = "plain", colour = "black", size = THESIS_FONTSIZE),
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor.x = element_blank()
+  )
+```
+
+```{r}
+#| label: fig-rq2a-sd-lines-shaded
+#| echo: false
+#| fig-cap: "Between-surrogate SD of surrogate-level mean LLM scores by condition (RQ2a). Lines = number of texts (1, 3, 5), shaded light to dark; x-axis = target word length (fully independent). Error bars = 95% bootstrap CIs."
+#| fig-width: 10
+#| fig-height: 4
+#| fig-dpi: 300
+
+ggplot(fig_rq2a_data,
+       aes(x = target_words, y = sd,
+           group = text_count, color = text_count, fill = text_count)) +
+  geom_ribbon(aes(ymin = ci_lo, ymax = ci_hi), alpha = 0.12, color = NA, position = DODGE) +
+  geom_line(linewidth = 0.2, linetype = "solid", position = DODGE) +
+  geom_errorbar(aes(ymin = ci_lo, ymax = ci_hi), width = 0, linewidth = 0.8, position = DODGE) +
+  geom_point(shape = 21, fill = "white", size = 1.5, stroke = 1.8, position = DODGE) +
+  facet_wrap(~need, ncol = 3L) +
+  scale_x_continuous(
+    breaks = c(50L, 150L, 300L),
+    labels = c("Short\n(50)", "Medium\n(150)", "Long\n(300)")
+  ) +
+  scale_color_manual(values = COL_AI_TEXTS, name = "Number of texts") +
+  scale_fill_manual(values  = COL_AI_TEXTS, name = "Number of texts") +
+  labs(
+    x = "Target word length",
+    y = "Between-surrogate SD"
+  ) +
+  theme_minimal(base_size = THESIS_FONTSIZE) +
+  theme(
+    text               = element_text(family = THESIS_FONT),
+    strip.text         = element_text(face = "plain", colour = "black", size = THESIS_FONTSIZE),
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor.x = element_blank(),
+    panel.grid.major.y = element_line(linewidth = 0.3),
+    panel.grid.minor.y = element_line(linewidth = 0.3),
+    axis.title.x       = element_text(margin = margin(t = 12)),
+    axis.title.y       = element_text(margin = margin(r = 12)),
+    legend.position    = c(0.18, 0.2),
+    legend.direction   = "horizontal",
+    legend.margin      = margin(t = 4),
+    legend.background  = element_rect(fill = "white", color = NA),
+    legend.key         = element_blank(),
+    legend.title       = element_text(face = "plain")
+  )
+```
+
+*Note.* N = `r nrow(wide_rq2)` AI surrogates. Error bars = 95% bootstrap CIs (R = `r BOOTSTRAP_SAMPLES`). Line shading light to dark = 1, 3, 5 texts.
+
+## 3.5 Pre-Specified Contrasts — SD
+
+```{r}
+#| label: tbl-rq2a-contrasts
+#| echo: false
+#| tbl-cap: "Pre-Specified Contrasts for Between-Surrogate SD (RQ2a). Bootstrap percentile CIs; R = 10,000."
+
+compute_contrasts_rq2 <- function(vals) {
+  c(
+    "Length (long-short) | 1 text"      = vals[["long-1"]]   - vals[["short-1"]],
+    "Length (long-short) | 3 texts"     = vals[["long-3"]]   - vals[["short-3"]],
+    "Length (long-short) | 5 texts"     = vals[["long-5"]]   - vals[["short-5"]],
+    "Texts (5-1) | short"               = vals[["short-5"]]  - vals[["short-1"]],
+    "Texts (5-1) | medium"              = vals[["medium-5"]] - vals[["medium-1"]],
+    "Texts (5-1) | long"                = vals[["long-5"]]   - vals[["long-1"]],
+    "Grand diagonal (long-5 - short-1)" = vals[["long-5"]]   - vals[["short-1"]]
+  )
+}
+
+format_rq2_contrasts <- function(boot_obj, need_prefix, delta_label = "Delta") {
+  col_idx   <- paste0(need_prefix, "_", CONDITIONS)
+  t0        <- setNames(boot_obj$t0[col_idx], CONDITIONS)
+  boot_t    <- boot_obj$t[, col_idx, drop = FALSE]
+  delta_t0  <- compute_contrasts_rq2(t0)
+  delta_boot <- t(apply(boot_t, 1L, function(row) {
+    names(row) <- CONDITIONS
+    compute_contrasts_rq2(row)
+  }))
+  ci_l <- apply(delta_boot, 2L, quantile, CI_Q_LO, na.rm = TRUE)
+  ci_u <- apply(delta_boot, 2L, quantile, CI_Q_HI, na.rm = TRUE)
+  tibble::tibble(
+    Contrast        = names(delta_t0),
+    !!delta_label  := sprintf("%.2f [%.2f, %.2f]", delta_t0, ci_l, ci_u)
+  )
+}
+
+bind_cols(
+  format_rq2_contrasts(boot_sd_rq2, "aut", "Delta SD (Aut)"),
+  format_rq2_contrasts(boot_sd_rq2, "com", "Delta SD (Com)") |> dplyr::select(-Contrast),
+  format_rq2_contrasts(boot_sd_rq2, "rel", "Delta SD (Rel)") |> dplyr::select(-Contrast)
+) |>
+  flextable() |>
+  style_apa7() |>
+  add_apa_note(paste0(
+    "Bootstrap percentile CIs, R = ", BOOTSTRAP_SAMPLES, ". ",
+    "Delta SD = condition A minus condition B."
+  ))
+```
+
+```{r}
+#| label: helper-contrasts-full
+#| include: false
+
+format_rq2_contrasts_full <- function(boot_obj, need_prefix) {
+  col_idx    <- paste0(need_prefix, "_", CONDITIONS)
+  t0         <- setNames(boot_obj$t0[col_idx], CONDITIONS)
+  boot_t     <- boot_obj$t[, col_idx, drop = FALSE]
+  delta_t0   <- compute_contrasts_rq2(t0)
+  delta_boot <- t(apply(boot_t, 1L, function(row) {
+    names(row) <- CONDITIONS
+    compute_contrasts_rq2(row)
+  }))
+  se   <- apply(delta_boot, 2L, sd,       na.rm = TRUE)
+  ci_l <- apply(delta_boot, 2L, quantile, CI_Q_LO, na.rm = TRUE)
+  ci_u <- apply(delta_boot, 2L, quantile, CI_Q_HI, na.rm = TRUE)
+  p    <- 2 * (1 - pnorm(abs(delta_t0 / se)))
+  tibble::tibble(
+    Contrast = names(delta_t0),
+    Estimate = round(delta_t0, 2L),
+    SE       = round(se,       2L),
+    LL       = round(ci_l,     2L),
+    UL       = round(ci_u,     2L),
+    p        = ifelse(p < .001, "< .001", sprintf("%.3f", p))
+  )
+}
+```
+
+---
+
+## 3.6 Contrasts — SD: Full Detail (SE, p-Values, Forest Plot)
+
+```{r}
+#| label: tbl-rq2a-contrasts-full
+#| echo: false
+#| tbl-cap: "Bootstrap Contrasts ΔSD with SE and p-Values per Need (RQ2a)"
+
+build_contrast_need_sd <- function(prefix) {
+  format_rq2_contrasts_full(boot_sd_rq2, prefix) |>
+    dplyr::rename_with(~ paste0(., "_", prefix), -Contrast)
+}
+
+build_contrast_need_sd("aut") |>
+  dplyr::left_join(build_contrast_need_sd("com"), by = "Contrast") |>
+  dplyr::left_join(build_contrast_need_sd("rel"), by = "Contrast") |>
+  flextable() |>
+  style_apa7() |>
+  colformat_double(digits = 2) |>
+  set_header_labels(
+    Contrast     = "Contrast",
+    Estimate_aut = "Estimate", SE_aut = "SE", LL_aut = "LL", UL_aut = "UL", p_aut = "p",
+    Estimate_com = "Estimate", SE_com = "SE", LL_com = "LL", UL_com = "UL", p_com = "p",
+    Estimate_rel = "Estimate", SE_rel = "SE", LL_rel = "LL", UL_rel = "UL", p_rel = "p"
+  ) |>
+  add_header_row(
+    top = TRUE,
+    values    = c("", "Estimate", "SE", "95% CI", "p",
+                      "Estimate", "SE", "95% CI", "p",
+                      "Estimate", "SE", "95% CI", "p"),
+    colwidths = c(1L, 1L, 1L, 2L, 1L, 1L, 1L, 2L, 1L, 1L, 1L, 2L, 1L)
+  ) |>
+  add_header_row(
+    top = TRUE,
+    values    = c("", TABLE_LABEL_AUT, TABLE_LABEL_COM, TABLE_LABEL_REL),
+    colwidths = c(1L, 5L, 5L, 5L)
+  ) |>
+  align(i = 1:2, align = "center", part = "header") |>
+  add_apa_note(paste0(
+    "ΔSD = SD₁ − SD₂. SE = bootstrap SD of the contrast distribution. ",
+    "p = Wald test (2×Φ(−|ΔSD/SE|)). ",
+    "95% CI = bootstrap percentile interval, R = ", BOOTSTRAP_SAMPLES, ". ",
+    "N = ", nrow(wide_rq2), " AI surrogates. ",
+    "Across-n_texts contrasts reflect cumulative text structure; CIs are correlated observations."
+  )) |>
+  autofit()
+```
+
+```{r}
+#| label: fig-rq2a-contrasts-forest
+#| echo: false
+#| warning: false
+#| fig-cap: "Bootstrap contrast estimates (ΔSD) with 95% CIs per need dimension (RQ2a). Each row = one pre-specified endpoint contrast; x-axis = ΔSD; lines = 95% bootstrap percentile CI; dashed vertical line = 0. Dotted horizontal lines separate contrast groups (length effects, text-count effects, grand diagonal)."
+#| fig-width: 10
+#| fig-height: 4
+#| fig-dpi: 300
+
+rq2a_contrast_plot_data <- dplyr::bind_rows(
+  format_rq2_contrasts_full(boot_sd_rq2, "aut") |> dplyr::mutate(need = TABLE_LABEL_AUT),
+  format_rq2_contrasts_full(boot_sd_rq2, "com") |> dplyr::mutate(need = TABLE_LABEL_COM),
+  format_rq2_contrasts_full(boot_sd_rq2, "rel") |> dplyr::mutate(need = TABLE_LABEL_REL)
+) |>
+  dplyr::mutate(
+    need     = factor(need, levels = c(TABLE_LABEL_AUT, TABLE_LABEL_COM, TABLE_LABEL_REL)),
+    Contrast = factor(Contrast, levels = rev(unique(Contrast)))
+  )
+
+ggplot(rq2a_contrast_plot_data, aes(x = Estimate, y = Contrast)) +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "grey50", linewidth = 0.4) +
+  geom_hline(yintercept = c(1.5, 4.5), linetype = "dotted", color = "grey70", linewidth = 0.3) +
+  geom_segment(aes(x = LL, xend = UL, y = Contrast, yend = Contrast), linewidth = 0.7) +
+  geom_point(size = 2.5, shape = 21, fill = "white", stroke = 1.5) +
+  facet_wrap(~need, ncol = 3L) +
+  labs(x = "ΔSD [95% bootstrap CI]", y = NULL) +
+  theme_minimal(base_size = THESIS_FONTSIZE) +
+  theme(
+    text               = element_text(family = THESIS_FONT),
+    strip.text         = element_text(face = "plain", colour = "black", size = THESIS_FONTSIZE),
+    axis.title.x       = element_text(margin = margin(t = 12)),
+    panel.grid.major.y = element_blank(),
+    panel.grid.minor   = element_blank(),
+    panel.grid.major.x = element_line(linewidth = 0.2)
+  )
+```
+
+*Note.* N = `r nrow(wide_rq2)` AI surrogates. Bootstrap percentile CIs, R = `r BOOTSTRAP_SAMPLES`. Groups (top to bottom): length effects (ΔSD across word length at fixed text count); text-count effects (ΔSD across text count at fixed length); grand diagonal.
+
+---
+
+## 3.7 Mean LLM Scores by Condition
+
+Complementary to the SD analysis: how do surrogate-level mean LLM scores shift
+across conditions? A systematic shift would indicate scoring-level bias or a
+consistent contextual anchor effect, distinct from the variability question in
+§3.1–3.6.
+
+```{r}
+#| label: prep-fig-rq2a-mean-data
+#| include: false
+
+fig_rq2a_mean_data <- purrr::map_dfr(
+  list(
+    list(prefix = "aut", label = TABLE_LABEL_AUT),
+    list(prefix = "com", label = TABLE_LABEL_COM),
+    list(prefix = "rel", label = TABLE_LABEL_REL)
+  ),
+  function(x) {
+    col_idx <- paste0(x$prefix, "_", CONDITIONS)
+    boot_t  <- boot_mean_rq2$t[, col_idx, drop = FALSE]
+    tibble::tibble(
+      condition = CONDITIONS,
+      need      = x$label,
+      mean      = boot_mean_rq2$t0[col_idx],
+      ci_lo     = apply(boot_t, 2L, quantile, CI_Q_LO, na.rm = TRUE),
+      ci_hi     = apply(boot_t, 2L, quantile, CI_Q_HI, na.rm = TRUE)
+    ) |>
+      dplyr::left_join(condition_lookup, by = "condition") |>
+      dplyr::mutate(text_count = factor(text_count, levels = N_TEXTS_VARIANTS))
+  }
+) |>
+  dplyr::mutate(need = factor(need, levels = c(TABLE_LABEL_AUT, TABLE_LABEL_COM, TABLE_LABEL_REL)))
+```
+
+```{r}
+#| label: fig-rq2a-mean-lines
+#| echo: false
+#| fig-cap: "Mean LLM score (surrogate-level) by condition (RQ2a). Lines = number of texts (1, 3, 5); x-axis = target word length (fully independent). Error bars = 95% bootstrap CIs."
+#| fig-width: 10
+#| fig-height: 4
+#| fig-dpi: 300
+
+ggplot(fig_rq2a_mean_data,
+       aes(x = target_words, y = mean,
+           group = text_count, color = text_count)) +
+  geom_line(linewidth = 0.8, position = DODGE) +
+  geom_point(size = 2.5, position = DODGE) +
+  geom_errorbar(aes(ymin = ci_lo, ymax = ci_hi), width = 0, alpha = 0.7, position = DODGE) +
+  facet_wrap(~need, ncol = 3L) +
+  scale_x_continuous(
+    breaks = c(50L, 150L, 300L),
+    labels = c("Short\n(50)", "Medium\n(150)", "Long\n(300)")
+  ) +
+  scale_y_continuous(limits = c(1, 5)) +
+  scale_color_manual(values = COL_AI_TEXTS) +
+  labs(
+    x     = "Target word length",
+    y     = "Mean LLM score",
+    color = "Texts (n)"
+  ) +
+  theme_minimal(base_size = THESIS_FONTSIZE) +
+  theme(
+    text            = element_text(family = THESIS_FONT),
+    legend.position = "bottom",
+    strip.text      = element_text(face = "plain", colour = "black", size = THESIS_FONTSIZE)
+  )
+```
+
+```{r}
+#| label: fig-rq2a-mean-lines-shaded
+#| echo: false
+#| warning: false
+#| fig-cap: "Mean LLM score (surrogate-level) by condition (RQ2a). Lines = number of texts (1, 3, 5), shaded light to dark; x-axis = target word length (fully independent)."
+#| fig-width: 10
+#| fig-height: 4
+#| fig-dpi: 300
+
+ggplot(fig_rq2a_mean_data,
+       aes(x = target_words, y = mean,
+           group = text_count, color = text_count)) +
+  geom_line(linewidth = 0.4, linetype = "solid", position = DODGE) +
+  geom_point(shape = 21, fill = "white", size = 1.5, stroke = 1.8, position = DODGE) +
+  facet_wrap(~need, ncol = 3L) +
+  scale_x_continuous(
+    breaks = c(50L, 150L, 300L),
+    labels = c("Short\n(50)", "Medium\n(150)", "Long\n(300)")
+  ) +
+  scale_y_continuous(limits = c(1, 5)) +
+  scale_color_manual(values = COL_AI_TEXTS, name = "Number of texts") +
+  labs(x = "Target word length", y = "Mean LLM score") +
+  theme_minimal(base_size = THESIS_FONTSIZE) +
+  theme(
+    text                 = element_text(family = THESIS_FONT),
+    axis.title.x         = element_text(margin = margin(t = 12)),
+    axis.title.y         = element_text(margin = margin(r = 12)),
+    strip.text           = element_text(face = "plain", colour = "black", size = THESIS_FONTSIZE),
+    panel.grid.major.x   = element_blank(),
+    panel.grid.minor.x   = element_blank(),
+    panel.grid.major.y   = element_line(linewidth = 0.3),
+    panel.grid.minor.y   = element_line(linewidth = 0.3),
+    legend.position      = c(0.1, 0.2),
+    legend.direction     = "horizontal",
+    legend.justification = c("left", "bottom"),
+    legend.background    = element_rect(fill = "white", color = NA),
+    legend.key           = element_blank(),
+    legend.title         = element_text(face = "plain")
+  )
+```
+
+*Note.* N = `r nrow(wide_rq2)` AI surrogates. Line shading light to dark = 1, 3, 5 texts.
+
+```{r}
+#| label: fig-rq2a-mean-by-volume-shaded
+#| echo: false
+#| fig-cap: "Mean LLM score (surrogate-level) by total word volume (RQ2a). Lines = need dimension; x-axis = target words × text count; ribbon = 95% bootstrap CI band. Error bars = 95% bootstrap CIs."
+#| fig-width: 8
+#| fig-dpi: 300
+
+fig_rq2a_mean_vol_data <- fig_rq2a_mean_data |>
+  dplyr::mutate(total_volume = as.integer(as.character(target_words)) *
+                  as.integer(as.character(text_count))) |>
+  dplyr::arrange(need, total_volume)
+
+pd_mean_vol <- position_dodge(width = 30)
+
+ggplot(fig_rq2a_mean_vol_data,
+       aes(x = total_volume, y = mean, group = need, color = need, fill = need)) +
+  geom_ribbon(aes(ymin = ci_lo, ymax = ci_hi), alpha = 0.12, color = NA,
+              position = pd_mean_vol) +
+  geom_line(aes(fill = NULL), linewidth = 0.4, linetype = "solid",
+            position = pd_mean_vol) +
+  geom_errorbar(aes(ymin = ci_lo, ymax = ci_hi, fill = NULL), width = 0,
+                linewidth = 0.8, position = pd_mean_vol) +
+  geom_point(shape = 21, fill = "white", size = 1.5, stroke = 1.8,
+             position = pd_mean_vol) +
+  scale_x_continuous(breaks = unique(fig_rq2a_mean_vol_data$total_volume)) +
+  scale_y_continuous(limits = c(1, 5)) +
+  scale_color_manual(values = COL_AI_LLM, name = "Need") +
+  scale_fill_manual(values  = COL_AI_LLM, name = "Need") +
+  labs(x = "Total word volume (target words × text count)", y = "Mean LLM score") +
+  theme_minimal(base_size = THESIS_FONTSIZE) +
+  theme(
+    text                 = element_text(family = THESIS_FONT),
+    axis.text.x          = element_text(angle = 45, hjust = 1),
+    axis.title.x         = element_text(margin = margin(t = 12)),
+    axis.title.y         = element_text(margin = margin(r = 12)),
+    panel.grid.major.x   = element_blank(),
+    panel.grid.minor.x   = element_blank(),
+    panel.grid.major.y   = element_line(linewidth = 0.3),
+    panel.grid.minor.y   = element_line(linewidth = 0.3),
+    legend.position      = c(0.02, 0.08),
+    legend.justification = c("left", "bottom"),
+    legend.background    = element_rect(fill = "white", color = NA),
+    legend.key           = element_blank(),
+    legend.title         = element_text(face = "italic")
+  )
+```
+
+*Note.* N = `r nrow(wide_rq2)` AI surrogates. Error bars = 95% bootstrap CIs (R = `r BOOTSTRAP_SAMPLES`).
+
+### Mean Contrasts — ΔMean with SE and p-Values
+
+```{r}
+#| label: tbl-rq2a-mean-contrasts-full
+#| echo: false
+#| tbl-cap: "Bootstrap Contrasts ΔMean with SE and p-Values per Need (RQ2a)"
+
+build_contrast_need_mean <- function(prefix) {
+  format_rq2_contrasts_full(boot_mean_rq2, prefix) |>
+    dplyr::rename_with(~ paste0(., "_", prefix), -Contrast)
+}
+
+build_contrast_need_mean("aut") |>
+  dplyr::left_join(build_contrast_need_mean("com"), by = "Contrast") |>
+  dplyr::left_join(build_contrast_need_mean("rel"), by = "Contrast") |>
+  flextable() |>
+  style_apa7() |>
+  colformat_double(digits = 2) |>
+  set_header_labels(
+    Contrast     = "Contrast",
+    Estimate_aut = "Estimate", SE_aut = "SE", LL_aut = "LL", UL_aut = "UL", p_aut = "p",
+    Estimate_com = "Estimate", SE_com = "SE", LL_com = "LL", UL_com = "UL", p_com = "p",
+    Estimate_rel = "Estimate", SE_rel = "SE", LL_rel = "LL", UL_rel = "UL", p_rel = "p"
+  ) |>
+  add_header_row(
+    top = TRUE,
+    values    = c("", "Estimate", "SE", "95% CI", "p",
+                      "Estimate", "SE", "95% CI", "p",
+                      "Estimate", "SE", "95% CI", "p"),
+    colwidths = c(1L, 1L, 1L, 2L, 1L, 1L, 1L, 2L, 1L, 1L, 1L, 2L, 1L)
+  ) |>
+  add_header_row(
+    top = TRUE,
+    values    = c("", TABLE_LABEL_AUT, TABLE_LABEL_COM, TABLE_LABEL_REL),
+    colwidths = c(1L, 5L, 5L, 5L)
+  ) |>
+  align(i = 1:2, align = "center", part = "header") |>
+  add_apa_note(paste0(
+    "ΔMean = Mean₁ − Mean₂ of surrogate-level mean LLM scores. ",
+    "SE = bootstrap SD. p = Wald test (2×Φ(−|ΔMean/SE|)). ",
+    "95% CI = bootstrap percentile interval, R = ", BOOTSTRAP_SAMPLES, ". ",
+    "N = ", nrow(wide_rq2), " AI surrogates. ",
+    "Across-n_texts contrasts reflect cumulative text structure; CIs are correlated observations."
+  )) |>
+  autofit()
+```
+
+```{r}
+#| label: fig-rq2a-mean-contrasts-forest
+#| echo: false
+#| fig-cap: "Bootstrap contrast estimates (ΔMean) with 95% CIs per need dimension (RQ2a). Each row = one pre-specified endpoint contrast; x-axis = ΔMean; lines = 95% bootstrap percentile CI; dashed vertical line = 0. Dotted horizontal lines separate contrast groups."
+#| fig-width: 10
+#| fig-height: 4
+#| fig-dpi: 300
+
+rq2a_mean_contrast_plot_data <- dplyr::bind_rows(
+  format_rq2_contrasts_full(boot_mean_rq2, "aut") |> dplyr::mutate(need = TABLE_LABEL_AUT),
+  format_rq2_contrasts_full(boot_mean_rq2, "com") |> dplyr::mutate(need = TABLE_LABEL_COM),
+  format_rq2_contrasts_full(boot_mean_rq2, "rel") |> dplyr::mutate(need = TABLE_LABEL_REL)
+) |>
+  dplyr::mutate(
+    need     = factor(need, levels = c(TABLE_LABEL_AUT, TABLE_LABEL_COM, TABLE_LABEL_REL)),
+    Contrast = factor(Contrast, levels = rev(unique(Contrast)))
+  )
+
+ggplot(rq2a_mean_contrast_plot_data, aes(x = Estimate, y = Contrast)) +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "grey50", linewidth = 0.4) +
+  geom_hline(yintercept = c(1.5, 4.5), linetype = "dotted", color = "grey70", linewidth = 0.3) +
+  geom_segment(aes(x = LL, xend = UL, y = Contrast, yend = Contrast), linewidth = 0.7) +
+  geom_point(size = 2.5, shape = 21, fill = "white", stroke = 1.5) +
+  facet_wrap(~need, ncol = 3L) +
+  labs(x = "ΔMean [95% bootstrap CI]", y = NULL) +
+  theme_minimal(base_size = THESIS_FONTSIZE) +
+  theme(
+    text               = element_text(family = THESIS_FONT),
+    strip.text         = element_text(face = "plain", colour = "black", size = THESIS_FONTSIZE),
+    axis.title.x       = element_text(margin = margin(t = 12)),
+    panel.grid.major.y = element_blank(),
+    panel.grid.minor   = element_blank(),
+    panel.grid.major.x = element_line(linewidth = 0.2)
+  )
+```
+
+*Note.* N = `r nrow(wide_rq2)` AI surrogates. Bootstrap percentile CIs, R = `r BOOTSTRAP_SAMPLES`. Groups (top to bottom): length effects (ΔMean across word length at fixed text count); text-count effects (ΔMean across text count at fixed length); grand diagonal.
+
+---
+
+# 4 RQ2b — LLM–Questionnaire Correspondence (Pearson r)
+
+RQ2b asks: to what extent do text length and number of texts affect the
+LLM–questionnaire correlation?
+
+## 4.1 Assumption Check — Linearity
+
+LOESS vs OLS overlay for all 27 condition × need combinations.
+
+```{r}
+#| label: fig-rq2b-assump-scatter
+#| echo: false
+#| warning: false
+#| fig-cap: "Linearity Assumption: LOESS (solid) vs OLS (dashed) for each condition × need panel. Close agreement supports Pearson r."
+#| fig-width: 20
+#| fig-height: 6
+#| fig-dpi: 300
+
+long_rq2_scatter <- wide_rq2 |>
+  tidyr::pivot_longer(
+    cols          = dplyr::matches("^llm_(aut|com|rel)_mean_"),
+    names_to      = c("need", "condition"),
+    names_pattern = "llm_(aut|com|rel)_mean_(.*)"
+  ) |>
+  dplyr::rename(llm_score = value) |>
+  dplyr::mutate(
+    q_score = dplyr::case_when(
+      need == "aut" ~ q_aut_mean,
+      need == "com" ~ q_com_mean,
+      need == "rel" ~ q_rel_mean
+    ),
+    need_label = factor(dplyr::case_when(
+      need == "aut" ~ TABLE_LABEL_AUT,
+      need == "com" ~ TABLE_LABEL_COM,
+      need == "rel" ~ TABLE_LABEL_REL
+    ), levels = c(TABLE_LABEL_AUT, TABLE_LABEL_COM, TABLE_LABEL_REL)),
+    condition = factor(condition, levels = CONDITIONS)
+  )
+
+ggplot(long_rq2_scatter, aes(x = llm_score, y = q_score)) +
+  geom_jitter(alpha = 0.2, size = 0.8, width = 0.12, height = 0.12,
+              colour = COL_AI_SINGLE) +
+  geom_smooth(method = "loess", colour = "steelblue", se = FALSE,
+              linewidth = 0.7, formula = y ~ x) +
+  geom_smooth(method = "lm",    colour = COL_DIFF,   se = FALSE,
+              linewidth = 0.5,  linetype = "dashed",  formula = y ~ x) +
+  facet_grid(need_label ~ condition) +
+  scale_x_continuous(limits = c(1, 5), breaks = 1:5) +
+  scale_y_continuous(limits = c(1, 5), breaks = 1:5) +
+  labs(x = "LLM score", y = "Questionnaire score") +
+  theme_thesis() +
+  theme(strip.text.x = element_text(size = 7),
+        axis.text    = element_text(size = 7))
+```
+
+## 4.2 Bootstrap Pearson r
+
+```{r}
+#| label: boot-r-rq2
+#| include: false
+#| cache: true
+#| cache.extra: !expr list(file.mtime(rds_paths$ai_cond), BOOTSTRAP_SAMPLES)
+
+boot_fn_r <- function(data, indices) {
+  d <- data[indices, ]
+  c(
+    setNames(vapply(aut_cols,
+                    function(col) cor(d[[col]], d$q_aut_mean, use = "complete.obs"),
+                    numeric(1L)),
+             paste0("aut_", CONDITIONS)),
+    setNames(vapply(com_cols,
+                    function(col) cor(d[[col]], d$q_com_mean, use = "complete.obs"),
+                    numeric(1L)),
+             paste0("com_", CONDITIONS)),
+    setNames(vapply(rel_cols,
+                    function(col) cor(d[[col]], d$q_rel_mean, use = "complete.obs"),
+                    numeric(1L)),
+             paste0("rel_", CONDITIONS))
+  )
+}
+
+set.seed(2026)
+boot_r_rq2 <- boot::boot(data = wide_rq2_df, statistic = boot_fn_r,
+                         R = BOOTSTRAP_SAMPLES)
+colnames(boot_r_rq2$t) <- names(boot_r_rq2$t0)
+
+saveRDS(boot_r_rq2, file.path(EXPORT_DIR, "boot_r_rq2.rds"))
+message("boot_r_rq2 complete and saved.")
+```
+
+## 4.3 BCa Sensitivity Check — Pearson r
+
+```{r}
+#| label: check-bca-r-rq2
+#| include: false
+
+bca_r_results <- purrr::map_dfr(
+  list(list(prefix = "aut", label = TABLE_LABEL_AUT),
+       list(prefix = "com", label = TABLE_LABEL_COM),
+       list(prefix = "rel", label = TABLE_LABEL_REL)),
+  function(x) {
+    purrr::map_dfr(seq_along(CONDITIONS), function(j) {
+      col_name <- paste0(x$prefix, "_", CONDITIONS[j])
+      idx      <- which(names(boot_r_rq2$t0) == col_name)
+      perc_ci  <- boot::boot.ci(boot_r_rq2, index = idx, type = "perc")$percent[4:5]
+      bca_ci   <- tryCatch(
+        boot::boot.ci(boot_r_rq2, index = idx, type = "bca")$bca[4:5],
+        error = function(e) c(NA_real_, NA_real_)
+      )
+      tibble::tibble(
+        need = x$label, condition = CONDITIONS[j],
+        perc_lo = perc_ci[1], perc_hi = perc_ci[2],
+        bca_lo  = bca_ci[1],  bca_hi  = bca_ci[2],
+        max_diff = max(abs(bca_lo - perc_lo), abs(bca_hi - perc_hi), na.rm = TRUE)
+      )
+    })
+  }
+)
+
+check_bca_divergence_r <- bca_r_results |> filter(max_diff > 0.02)
+
+if (nrow(check_bca_divergence_r) > 0) {
+  cat("BCa/percentile divergence > .02 in", nrow(check_bca_divergence_r),
+      "Pearson r cells:\n")
+  print(check_bca_divergence_r)
+} else {
+  cat("BCa sensitivity check OK: all Pearson r CIs agree within .02.\n")
+}
+```
+
+## 4.4 Pearson r Results Table
+
+```{r}
+#| label: tbl-rq2b-r
+#| echo: false
+#| tbl-cap: "LLM–Questionnaire Pearson Correlations by Condition and Need Dimension (RQ2b). Percentile CIs; R = 10,000."
+
+bind_rows(
+  format_rq2_matrix(boot_r_rq2, "aut") |> mutate(Need = TABLE_LABEL_AUT),
+  format_rq2_matrix(boot_r_rq2, "com") |> mutate(Need = TABLE_LABEL_COM),
+  format_rq2_matrix(boot_r_rq2, "rel") |> mutate(Need = TABLE_LABEL_REL)
+) |>
+  dplyr::select(Need, `Word length` = target_words, `1`, `3`, `5`) |>
+  flextable() |>
+  set_header_labels(`1` = "1 text", `3` = "3 texts", `5` = "5 texts") |>
+  style_apa7() |>
+  add_apa_note(paste0(
+    "N = ", nrow(wide_rq2), ". Pearson r between surrogate-level mean LLM score and ",
+    "questionnaire composite. Bootstrap percentile CIs, R = ", BOOTSTRAP_SAMPLES,
+    ". BCa sensitivity: see check_bca_divergence_r."
+  ))
+```
+
+## 4.5 Pre-Specified Contrasts — Pearson r
+
+```{r}
+#| label: tbl-rq2b-contrasts
+#| echo: false
+#| tbl-cap: "Pre-Specified Contrasts for LLM–Questionnaire Correlation (RQ2b). Bootstrap percentile CIs; R = 10,000."
+
+bind_cols(
+  format_rq2_contrasts(boot_r_rq2, "aut", "Delta r (Aut)"),
+  format_rq2_contrasts(boot_r_rq2, "com", "Delta r (Com)") |> dplyr::select(-Contrast),
+  format_rq2_contrasts(boot_r_rq2, "rel", "Delta r (Rel)") |> dplyr::select(-Contrast)
+) |>
+  flextable() |>
+  style_apa7() |>
+  add_apa_note(paste0(
+    "Bootstrap percentile CIs, R = ", BOOTSTRAP_SAMPLES, ". ",
+    "Delta r = r in condition A minus r in condition B."
+  ))
+```
+
+### Full Contrasts with SE and p-Values
+
+```{r}
+#| label: tbl-rq2b-contrasts-full
+#| echo: false
+#| tbl-cap: "Bootstrap Contrasts Δr with SE and p-Values per Need (RQ2b)"
+
+build_contrast_need_r <- function(prefix) {
+  format_rq2_contrasts_full(boot_r_rq2, prefix) |>
+    dplyr::rename_with(~ paste0(., "_", prefix), -Contrast)
+}
+
+build_contrast_need_r("aut") |>
+  dplyr::left_join(build_contrast_need_r("com"), by = "Contrast") |>
+  dplyr::left_join(build_contrast_need_r("rel"), by = "Contrast") |>
+  flextable() |>
+  style_apa7() |>
+  colformat_double(digits = 2) |>
+  set_header_labels(
+    Contrast     = "Contrast",
+    Estimate_aut = "Estimate", SE_aut = "SE", LL_aut = "LL", UL_aut = "UL", p_aut = "p",
+    Estimate_com = "Estimate", SE_com = "SE", LL_com = "LL", UL_com = "UL", p_com = "p",
+    Estimate_rel = "Estimate", SE_rel = "SE", LL_rel = "LL", UL_rel = "UL", p_rel = "p"
+  ) |>
+  add_header_row(
+    top = TRUE,
+    values    = c("", "Estimate", "SE", "95% CI", "p",
+                      "Estimate", "SE", "95% CI", "p",
+                      "Estimate", "SE", "95% CI", "p"),
+    colwidths = c(1L, 1L, 1L, 2L, 1L, 1L, 1L, 2L, 1L, 1L, 1L, 2L, 1L)
+  ) |>
+  add_header_row(
+    top = TRUE,
+    values    = c("", TABLE_LABEL_AUT, TABLE_LABEL_COM, TABLE_LABEL_REL),
+    colwidths = c(1L, 5L, 5L, 5L)
+  ) |>
+  align(i = 1:2, align = "center", part = "header") |>
+  add_apa_note(paste0(
+    "Δr = r₁ − r₂. SE = bootstrap SD of the contrast distribution. ",
+    "p = Wald test (2×Φ(−|Δr/SE|)). ",
+    "95% CI = bootstrap percentile interval, R = ", BOOTSTRAP_SAMPLES, ". ",
+    "N = ", nrow(wide_rq2), " AI surrogates. ",
+    "Across-n_texts contrasts reflect cumulative text structure; CIs are correlated observations."
+  )) |>
+  autofit()
+```
+
+```{r}
+#| label: fig-rq2b-contrasts-forest
+#| echo: false
+#| warning: false
+#| fig-cap: "Bootstrap contrast estimates (Δr) with 95% CIs per need dimension (RQ2b). Each row = one pre-specified endpoint contrast; x-axis = Δr; lines = 95% bootstrap percentile CI; dashed vertical line = 0. Dotted horizontal lines separate contrast groups (length effects, text-count effects, grand diagonal)."
+#| fig-width: 10
+#| fig-height: 4
+#| fig-dpi: 300
+
+rq2b_contrast_plot_data <- dplyr::bind_rows(
+  format_rq2_contrasts_full(boot_r_rq2, "aut") |> dplyr::mutate(need = TABLE_LABEL_AUT),
+  format_rq2_contrasts_full(boot_r_rq2, "com") |> dplyr::mutate(need = TABLE_LABEL_COM),
+  format_rq2_contrasts_full(boot_r_rq2, "rel") |> dplyr::mutate(need = TABLE_LABEL_REL)
+) |>
+  dplyr::mutate(
+    need     = factor(need, levels = c(TABLE_LABEL_AUT, TABLE_LABEL_COM, TABLE_LABEL_REL)),
+    Contrast = factor(Contrast, levels = rev(unique(Contrast)))
+  )
+
+ggplot(rq2b_contrast_plot_data, aes(x = Estimate, y = Contrast)) +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "grey50", linewidth = 0.4) +
+  geom_hline(yintercept = c(1.5, 4.5), linetype = "dotted", color = "grey70", linewidth = 0.3) +
+  geom_segment(aes(x = LL, xend = UL, y = Contrast, yend = Contrast), linewidth = 0.7) +
+  geom_point(size = 2.5, shape = 21, fill = "white", stroke = 1.5) +
+  facet_wrap(~need, ncol = 3L) +
+  labs(x = "Δr [95% bootstrap CI]", y = NULL) +
+  theme_minimal(base_size = THESIS_FONTSIZE) +
+  theme(
+    text               = element_text(family = THESIS_FONT),
+    strip.text         = element_text(face = "plain", colour = "black", size = THESIS_FONTSIZE),
+    axis.title.x       = element_text(margin = margin(t = 12)),
+    panel.grid.major.y = element_blank(),
+    panel.grid.minor   = element_blank(),
+    panel.grid.major.x = element_line(linewidth = 0.2)
+  )
+```
+
+*Note.* N = `r nrow(wide_rq2)` AI surrogates. Bootstrap percentile CIs, R = `r BOOTSTRAP_SAMPLES`. Groups (top to bottom): length effects (Δr across word length at fixed text count); text-count effects (Δr across text count at fixed length); grand diagonal.
+
+## 4.6 Pearson r Line Plot
+
+```{r}
+#| label: fig-rq2b-lineplot
+#| echo: false
+#| fig-cap: "LLM–Questionnaire Pearson r by Condition (RQ2b). Lines = number of texts; error bars = 95% percentile bootstrap CIs. Dashed line at r = 0."
+#| fig-width: 9
+#| fig-height: 4
+#| fig-dpi: 300
+
+cowplot::plot_grid(
+  plot_rq2_lines(boot_r_rq2, "aut", TABLE_LABEL_AUT, ref_line = 0),
+  plot_rq2_lines(boot_r_rq2, "com", TABLE_LABEL_COM, ref_line = 0),
+  plot_rq2_lines(boot_r_rq2, "rel", TABLE_LABEL_REL, ref_line = 0),
+  ncol = 3L, align = "hv"
+)
+```
+
+### Shaded
+
+```{r}
+#| label: fig-rq2b-r-lines-shaded
+#| echo: false
+#| fig-cap: "Pearson r (LLM score vs. questionnaire subscale score) by condition (RQ2b). Lines = number of texts (1, 3, 5), shaded light to dark; x-axis = target word length (fully independent). Error bars = 95% bootstrap CIs."
+#| fig-width: 10
+#| fig-height: 4
+#| fig-dpi: 300
+
+fig_rq2b_data <- purrr::map_dfr(
+  list(
+    list(prefix = "aut", label = TABLE_LABEL_AUT),
+    list(prefix = "com", label = TABLE_LABEL_COM),
+    list(prefix = "rel", label = TABLE_LABEL_REL)
+  ),
+  function(x) {
+    col_idx <- paste0(x$prefix, "_", CONDITIONS)
+    boot_t  <- boot_r_rq2$t[, col_idx, drop = FALSE]
+    tibble::tibble(
+      condition = CONDITIONS,
+      need      = x$label,
+      r         = boot_r_rq2$t0[col_idx],
+      ci_lo     = apply(boot_t, 2L, quantile, CI_Q_LO, na.rm = TRUE),
+      ci_hi     = apply(boot_t, 2L, quantile, CI_Q_HI, na.rm = TRUE)
+    ) |>
+      dplyr::left_join(condition_lookup, by = "condition") |>
+      dplyr::mutate(text_count = factor(text_count, levels = N_TEXTS_VARIANTS))
+  }
+) |>
+  dplyr::mutate(need = factor(need, levels = c(TABLE_LABEL_AUT, TABLE_LABEL_COM, TABLE_LABEL_REL)))
+
+ggplot(fig_rq2b_data,
+       aes(x = target_words, y = r,
+           group = text_count, color = text_count, fill = text_count)) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "grey60",
+             linewidth = 0.4) +
+  geom_ribbon(aes(ymin = ci_lo, ymax = ci_hi), alpha = 0.12, color = NA, position = DODGE) +
+  geom_line(linewidth = 0.2, linetype = "solid", position = DODGE) +
+  geom_errorbar(aes(ymin = ci_lo, ymax = ci_hi), width = 0, linewidth = 0.8, position = DODGE) +
+  geom_point(shape = 21, fill = "white", size = 1.5, stroke = 1.8, position = DODGE) +
+  facet_wrap(~need, ncol = 3L) +
+  scale_x_continuous(
+    breaks = c(50L, 150L, 300L),
+    labels = c("Short\n(50)", "Medium\n(150)", "Long\n(300)")
+  ) +
+  scale_color_manual(
+    values = COL_AI_TEXTS,
+    name   = "Number of texts"
+  ) +
+  scale_fill_manual(
+    values = COL_AI_TEXTS,
+    name   = "Number of texts"
+  ) +
+  coord_cartesian(ylim = c(-0.5, 0.5)) +
+  labs(
+    x = "Target word length",
+    y = expression(paste("Pearson ", italic(r)))
+  ) +
+  theme_minimal(base_size = THESIS_FONTSIZE) +
+  theme(
+    text               = element_text(family = THESIS_FONT),
+    strip.text         = element_text(face = "plain", colour = "black", size = THESIS_FONTSIZE),
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor.x = element_blank(),
+    panel.grid.major.y = element_line(linewidth = 0.3),
+    panel.grid.minor.y = element_line(linewidth = 0.3),
+    axis.title.x       = element_text(margin = margin(t = 12)),
+    axis.title.y       = element_text(margin = margin(r = 12)),
+    legend.position    = c(0.28, 0.15),
+    legend.direction   = "horizontal",
+    legend.margin      = margin(t = 4),
+    legend.background  = element_rect(fill = "white", color = NA),
+    legend.key         = element_blank(),
+    legend.title       = element_text(face = "plain")
+  )
+```
+
+*Note.* N = `r nrow(wide_rq2)` AI surrogates. Error bars = 95% bootstrap CIs (R = `r BOOTSTRAP_SAMPLES`). Line shading light to dark = 1, 3, 5 texts.
+
+## 4.7 Robustness: Spearman rho
+
+Spearman rho replaces Pearson r throughout. Bootstrap percentile CIs,
+R = `r POLY_BOOT_R_RQ2` (reduced because Spearman is slower).
+
+```{r}
+#| label: boot-spearman-rq2
+#| include: false
+#| cache: true
+#| cache.extra: !expr list(file.mtime(rds_paths$ai_cond), POLY_BOOT_R_RQ2)
+
+boot_fn_spearman <- function(data, indices) {
+  d <- data[indices, ]
+  c(
+    setNames(
+      vapply(aut_cols,
+             function(col) cor(d[[col]], d$q_aut_mean,
+                               use = "complete.obs", method = "spearman"),
+             numeric(1L)),
+      paste0("aut_", CONDITIONS)
+    ),
+    setNames(
+      vapply(com_cols,
+             function(col) cor(d[[col]], d$q_com_mean,
+                               use = "complete.obs", method = "spearman"),
+             numeric(1L)),
+      paste0("com_", CONDITIONS)
+    ),
+    setNames(
+      vapply(rel_cols,
+             function(col) cor(d[[col]], d$q_rel_mean,
+                               use = "complete.obs", method = "spearman"),
+             numeric(1L)),
+      paste0("rel_", CONDITIONS)
+    )
+  )
+}
+
+set.seed(2026)
+spearman_results_rq2 <- boot::boot(data = wide_rq2_df, statistic = boot_fn_spearman,
+                                    R = POLY_BOOT_R_RQ2)
+colnames(spearman_results_rq2$t) <- names(spearman_results_rq2$t0)
+
+saveRDS(spearman_results_rq2, file.path(EXPORT_DIR, "boot_spearman_rq2.rds"))
+message("spearman_results_rq2 complete and saved.")
+```
+
+```{r}
+#| label: tbl-rq2b-spearman
+#| echo: false
+#| tbl-cap: "Spearman Robustness: LLM–Questionnaire Rho by Condition and Need Dimension. Percentile CIs; R = 1,000."
+
+bind_rows(
+  format_rq2_matrix(spearman_results_rq2, "aut") |> mutate(Need = TABLE_LABEL_AUT),
+  format_rq2_matrix(spearman_results_rq2, "com") |> mutate(Need = TABLE_LABEL_COM),
+  format_rq2_matrix(spearman_results_rq2, "rel") |> mutate(Need = TABLE_LABEL_REL)
+) |>
+  dplyr::select(Need, `Word length` = target_words, `1`, `3`, `5`) |>
+  flextable() |>
+  set_header_labels(`1` = "1 text", `3` = "3 texts", `5` = "5 texts") |>
+  style_apa7() |>
+  add_apa_note(paste0(
+    "N = ", nrow(wide_rq2), ". Spearman rho on unrounded continuous scores. ",
+    "Bootstrap percentile CIs, R = ", POLY_BOOT_R_RQ2, ". ",
+    "Compare with Pearson r in tbl-rq2b-r."
+  ))
+```
+
+```{r}
+#| label: check-spearman-divergence-rq2
+#| include: false
+
+# Flag conditions where |rho - r| > .05
+spearman_check <- tibble::tibble(
+  condition = rep(CONDITIONS, 3),
+  need      = rep(c("aut", "com", "rel"), each = length(CONDITIONS)),
+  r_pearson = c(boot_r_rq2$t0[paste0("aut_", CONDITIONS)],
+                boot_r_rq2$t0[paste0("com_", CONDITIONS)],
+                boot_r_rq2$t0[paste0("rel_", CONDITIONS)]),
+  rho       = c(spearman_results_rq2$t0[paste0("aut_", CONDITIONS)],
+                spearman_results_rq2$t0[paste0("com_", CONDITIONS)],
+                spearman_results_rq2$t0[paste0("rel_", CONDITIONS)])
+) |>
+  mutate(diff = abs(rho - r_pearson)) |>
+  filter(diff > 0.05)
+
+if (nrow(spearman_check) > 0) {
+  cat("Spearman check: |rho - r| > .05 in", nrow(spearman_check), "cell(s):\n")
+  print(spearman_check)
+} else {
+  cat("Spearman check OK: all |rho - r| <= .05.\n")
+}
+```
+
+### Spearman ρ Line Plot
+
+```{r}
+#| label: fig-rq2b-rho-lines-shaded
+#| echo: false
+#| fig-cap: "Spearman ρ (LLM score vs. questionnaire subscale score) by condition (RQ2b). Lines = number of texts (1, 3, 5), shaded light to dark; x-axis = target word length (fully independent). Error bars = 95% bootstrap CIs."
+#| fig-width: 10
+#| fig-height: 4
+#| fig-dpi: 300
+
+fig_rq2b_rho_data <- purrr::map_dfr(
+  list(
+    list(prefix = "aut", label = TABLE_LABEL_AUT),
+    list(prefix = "com", label = TABLE_LABEL_COM),
+    list(prefix = "rel", label = TABLE_LABEL_REL)
+  ),
+  function(x) {
+    col_idx <- paste0(x$prefix, "_", CONDITIONS)
+    boot_t  <- spearman_results_rq2$t[, col_idx, drop = FALSE]
+    tibble::tibble(
+      condition = CONDITIONS,
+      need      = x$label,
+      r         = spearman_results_rq2$t0[col_idx],
+      ci_lo     = apply(boot_t, 2L, quantile, CI_Q_LO, na.rm = TRUE),
+      ci_hi     = apply(boot_t, 2L, quantile, CI_Q_HI, na.rm = TRUE)
+    ) |>
+      dplyr::left_join(condition_lookup, by = "condition") |>
+      dplyr::mutate(text_count = factor(text_count, levels = N_TEXTS_VARIANTS))
+  }
+) |>
+  dplyr::mutate(need = factor(need, levels = c(TABLE_LABEL_AUT, TABLE_LABEL_COM, TABLE_LABEL_REL)))
+
+ggplot(fig_rq2b_rho_data,
+       aes(x = target_words, y = r,
+           group = text_count, color = text_count, fill = text_count)) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "grey60", linewidth = 0.4) +
+  geom_ribbon(aes(ymin = ci_lo, ymax = ci_hi), alpha = 0.12, color = NA, position = DODGE) +
+  geom_line(linewidth = 0.2, linetype = "solid", position = DODGE) +
+  geom_errorbar(aes(ymin = ci_lo, ymax = ci_hi), width = 0, linewidth = 0.8, position = DODGE) +
+  geom_point(shape = 21, fill = "white", size = 1.5, stroke = 1.8, position = DODGE) +
+  facet_wrap(~need, ncol = 3L) +
+  scale_x_continuous(
+    breaks = c(50L, 150L, 300L),
+    labels = c("Short\n(50)", "Medium\n(150)", "Long\n(300)")
+  ) +
+  scale_color_manual(values = COL_AI_TEXTS, name = "Number of texts") +
+  scale_fill_manual(values  = COL_AI_TEXTS, name = "Number of texts") +
+  coord_cartesian(ylim = c(-0.5, 0.5)) +
+  labs(x = "Target word length", y = "Spearman ρ") +
+  theme_minimal(base_size = THESIS_FONTSIZE) +
+  theme(
+    text               = element_text(family = THESIS_FONT),
+    strip.text         = element_text(face = "plain", colour = "black", size = THESIS_FONTSIZE),
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor.x = element_blank(),
+    panel.grid.major.y = element_line(linewidth = 0.3),
+    panel.grid.minor.y = element_line(linewidth = 0.3),
+    axis.title.x       = element_text(margin = margin(t = 12)),
+    axis.title.y       = element_text(margin = margin(r = 12)),
+    legend.position    = c(0.28, 0.15),
+    legend.direction   = "horizontal",
+    legend.margin      = margin(t = 4),
+    legend.background  = element_rect(fill = "white", color = NA),
+    legend.key         = element_blank(),
+    legend.title       = element_text(face = "plain")
+  )
+```
+
+*Note.* N = `r nrow(wide_rq2)` AI surrogates. Error bars = 95% bootstrap CIs (R = `r POLY_BOOT_R_RQ2`). Line shading light to dark = 1, 3, 5 texts.
+
+## 4.8 Robustness: Polychoric r
+
+Polychoric correlation treats both LLM and questionnaire scores as ordinal
+indicators of latent continuous variables. Scores are rounded to integers
+before the polychoric estimation. Bootstrap percentile CIs, R = `r POLY_BOOT_R_RQ2`.
+
+```{r}
+#| label: sec9-polychoric-rq2
+#| include: false
+#| cache: true
+#| cache.extra: !expr list(file.mtime(rds_paths$ai_cond), POLY_BOOT_R_RQ2)
+
+poly_boot_ci_rq2 <- function(data, llm_col, q_col) {
+  df    <- data[!is.na(data[[llm_col]]) & !is.na(data[[q_col]]), ]
+  x_hat <- round(df[[llm_col]])
+  y_hat <- round(df[[q_col]])
+  r_hat <- as.numeric(psych::polychoric(cbind(x_hat, y_hat))$rho[1, 2])
+  n     <- nrow(df)
+  boot_rs <- replicate(POLY_BOOT_R_RQ2, {
+    i <- sample.int(n, replace = TRUE)
+    tryCatch(
+      as.numeric(psych::polychoric(cbind(x_hat[i], y_hat[i]))$rho[1, 2]),
+      error   = function(e) NA_real_,
+      warning = function(w) NA_real_
+    )
+  })
+  na_count <- sum(is.na(boot_rs))
+  if (na_count / POLY_BOOT_R_RQ2 > 0.05)
+    warning(sprintf("poly_boot_ci_rq2: %d/%d bootstrap samples failed for %s x %s",
+                    na_count, POLY_BOOT_R_RQ2, llm_col, q_col))
+  list(r = r_hat, lo = quantile(boot_rs, CI_Q_LO, na.rm = TRUE),
+       hi = quantile(boot_rs, CI_Q_HI, na.rm = TRUE))
+}
+
+set.seed(2026)
+poly_results_rq2 <- purrr::map(CONDITIONS, function(cond) {
+  list(
+    condition = cond,
+    aut = poly_boot_ci_rq2(wide_rq2_df, paste0("llm_aut_mean_", cond), "q_aut_mean"),
+    com = poly_boot_ci_rq2(wide_rq2_df, paste0("llm_com_mean_", cond), "q_com_mean"),
+    rel = poly_boot_ci_rq2(wide_rq2_df, paste0("llm_rel_mean_", cond), "q_rel_mean")
+  )
+})
+
+saveRDS(poly_results_rq2, file.path(EXPORT_DIR, "poly_results_rq2.rds"))
+message("poly_results_rq2 complete and saved.")
+```
+
+```{r}
+#| label: tbl-rq2b-polychoric
+#| echo: false
+#| tbl-cap: "Polychoric Robustness: LLM–Questionnaire Correlation by Condition and Need Dimension. Percentile CIs; R = 1,000."
+
+fmt_poly_rq2 <- function(poly_list, need) {
+  purrr::map_dfr(poly_list, function(x) {
+    res <- x[[need]]
+    tibble::tibble(condition = x$condition,
+                   value = sprintf("%.2f [%.2f, %.2f]", res$r, res$lo, res$hi))
+  }) |>
+    dplyr::left_join(condition_lookup, by = "condition") |>
+    dplyr::mutate(text_count = factor(text_count, levels = N_TEXTS_VARIANTS)) |>
+    tidyr::pivot_wider(names_from = text_count, values_from = value) |>
+    dplyr::select(-condition) |>
+    dplyr::arrange(target_words) |>
+    dplyr::mutate(target_words = WORD_LENGTH_LABELS[as.character(target_words)])
+}
+
+bind_rows(
+  fmt_poly_rq2(poly_results_rq2, "aut") |> mutate(Need = TABLE_LABEL_AUT),
+  fmt_poly_rq2(poly_results_rq2, "com") |> mutate(Need = TABLE_LABEL_COM),
+  fmt_poly_rq2(poly_results_rq2, "rel") |> mutate(Need = TABLE_LABEL_REL)
+) |>
+  dplyr::select(Need, `Word length` = target_words, `1`, `3`, `5`) |>
+  flextable() |>
+  set_header_labels(`1` = "1 text", `3` = "3 texts", `5` = "5 texts") |>
+  style_apa7() |>
+  add_apa_note(paste0(
+    "N = ", nrow(wide_rq2), ". Polychoric r on rounded integer scores. ",
+    "Bootstrap percentile CIs, R = ", POLY_BOOT_R_RQ2, ". ",
+    "Compare with Pearson r in tbl-rq2b-r."
+  ))
+```
+
+---
+
+## 4.9 Method Comparison Summary
+
+```{r}
+#| label: tbl-method-comparison
+#| echo: false
+#| tbl-cap: "Method Comparison: Pearson r, Spearman rho, Polychoric r by Condition and Need Dimension (RQ2b)"
+
+method_tbl_rq2 <- purrr::map_dfr(CONDITIONS, function(cond) {
+  purrr::map_dfr(
+    list(list(prefix = "aut", need = TABLE_LABEL_AUT),
+         list(prefix = "com", need = TABLE_LABEL_COM),
+         list(prefix = "rel", need = TABLE_LABEL_REL)),
+    function(x) {
+      pnm  <- paste0(x$prefix, "_", cond)
+      poly <- poly_results_rq2[[which(CONDITIONS == cond)]][[x$prefix]]
+      tibble::tibble(
+        Condition = cond, Need = x$need,
+        `Pearson r`   = round(boot_r_rq2$t0[pnm], 2),
+        `Spearman rho` = round(spearman_results_rq2$t0[pnm], 2),
+        `Polychoric r` = round(poly$r, 2)
+      )
+    }
+  )
+})
+
+method_tbl_rq2 |>
+  flextable() |>
+  style_apa7() |>
+  add_apa_note(paste0(
+    "N = ", nrow(wide_rq2), ". Pearson and Spearman: unrounded continuous scores. ",
+    "Polychoric: rounded integer scores."
+  ))
+```
+
+### Method Comparison: Pearson, Spearman, and Polychoric
+
+```{r}
+#| label: prep-method-plot-data-rq2
+#| include: false
+
+method_plot_data_rq2 <- dplyr::bind_rows(lapply(CONDITIONS, function(cond) {
+  po    <- poly_results_rq2[[cond]]
+  pnm_a <- paste0("aut_", cond)
+  pnm_c <- paste0("com_", cond)
+  pnm_r <- paste0("rel_", cond)
+
+  r_aut  <- unname(boot_r_rq2$t0[pnm_a])
+  r_com  <- unname(boot_r_rq2$t0[pnm_c])
+  r_rel  <- unname(boot_r_rq2$t0[pnm_r])
+  pr_ci  <- function(col) quantile(boot_r_rq2$t[, col], c(CI_Q_LO, CI_Q_HI), na.rm = TRUE)
+  ci_a   <- pr_ci(pnm_a); ci_c <- pr_ci(pnm_c); ci_r <- pr_ci(pnm_r)
+
+  sp_aut <- unname(spearman_results_rq2$t0[pnm_a])
+  sp_com <- unname(spearman_results_rq2$t0[pnm_c])
+  sp_rel <- unname(spearman_results_rq2$t0[pnm_r])
+  sp_ci  <- function(col) quantile(spearman_results_rq2$t[, col], c(CI_Q_LO, CI_Q_HI), na.rm = TRUE)
+  sc_a   <- sp_ci(pnm_a); sc_c <- sp_ci(pnm_c); sc_r <- sp_ci(pnm_r)
+
+  rbind(
+    data.frame(condition=cond, need=TABLE_LABEL_AUT, method="Pearson",    r=r_aut,    ci_lo=ci_a[1], ci_hi=ci_a[2], stringsAsFactors=FALSE),
+    data.frame(condition=cond, need=TABLE_LABEL_COM, method="Pearson",    r=r_com,    ci_lo=ci_c[1], ci_hi=ci_c[2], stringsAsFactors=FALSE),
+    data.frame(condition=cond, need=TABLE_LABEL_REL, method="Pearson",    r=r_rel,    ci_lo=ci_r[1], ci_hi=ci_r[2], stringsAsFactors=FALSE),
+    data.frame(condition=cond, need=TABLE_LABEL_AUT, method="Spearman",   r=sp_aut,   ci_lo=sc_a[1], ci_hi=sc_a[2], stringsAsFactors=FALSE),
+    data.frame(condition=cond, need=TABLE_LABEL_COM, method="Spearman",   r=sp_com,   ci_lo=sc_c[1], ci_hi=sc_c[2], stringsAsFactors=FALSE),
+    data.frame(condition=cond, need=TABLE_LABEL_REL, method="Spearman",   r=sp_rel,   ci_lo=sc_r[1], ci_hi=sc_r[2], stringsAsFactors=FALSE),
+    data.frame(condition=cond, need=TABLE_LABEL_AUT, method="Polychoric", r=po$aut$r, ci_lo=po$aut$lo, ci_hi=po$aut$hi, stringsAsFactors=FALSE),
+    data.frame(condition=cond, need=TABLE_LABEL_COM, method="Polychoric", r=po$com$r, ci_lo=po$com$lo, ci_hi=po$com$hi, stringsAsFactors=FALSE),
+    data.frame(condition=cond, need=TABLE_LABEL_REL, method="Polychoric", r=po$rel$r, ci_lo=po$rel$lo, ci_hi=po$rel$hi, stringsAsFactors=FALSE)
+  )
+})) |>
+  dplyr::left_join(condition_lookup, by = "condition") |>
+  dplyr::mutate(
+    need       = factor(need,   levels = NEEDS),
+    method     = factor(method, levels = c("Pearson", "Spearman", "Polychoric")),
+    text_count = factor(text_count, levels = N_TEXTS_VARIANTS)
+  )
+```
+
+```{r}
+#| label: fig-rq2b-method-comparison
+#| fig-cap: "LLM–questionnaire correlations by method, condition, and need (AI surrogates). Rows = need dimension; columns = correlation method. Lines = number of texts (1, 3, 5); x-axis = target word length. Shaded band and error bars = 95% bootstrap CIs. Pearson and Spearman on unrounded scores; Polychoric on rounded integer scores."
+#| echo: false
+#| fig-width: 10
+#| fig-height: 7
+#| fig-dpi: 300
+
+ggplot(method_plot_data_rq2,
+       aes(x = target_words, y = r,
+           group = text_count, color = text_count, fill = text_count)) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "grey60", linewidth = 0.2) +
+  geom_ribbon(aes(ymin = ci_lo, ymax = ci_hi), alpha = 0.12, color = NA, position = DODGE) +
+  geom_line(linewidth = 0.8, position = DODGE) +
+  geom_point(size = 2.0, position = DODGE) +
+  geom_errorbar(aes(ymin = ci_lo, ymax = ci_hi), width = 0, alpha = 0.6, position = DODGE) +
+  facet_grid(need ~ method) +
+  scale_x_continuous(
+    breaks = c(50L, 150L, 300L),
+    labels = c("Short\n(50)", "Medium\n(150)", "Long\n(300)")
+  ) +
+  scale_color_manual(values = COL_AI_TEXTS, name = "Texts (n)") +
+  scale_fill_manual(values = COL_AI_TEXTS, name = "Texts (n)") +
+  labs(
+    x     = "Target word length",
+    y     = "Correlation",
+    color = "Texts (n)"
+  ) +
+  theme_thesis() +
+  theme(
+    legend.position  = "bottom",
+    strip.text       = element_text(face = "bold"),
+    strip.background = element_blank()
+  )
+```
+
+## 4.10 Full Cross-Correlation Heatmap (6×6)
+
+Each panel shows the full 6×6 lower-triangle Pearson correlation matrix between
+all LLM-scored and questionnaire need dimensions, per condition. Upper-left block =
+within-LLM inter-need correlations; lower-right block = within-questionnaire
+inter-need correlations (condition-invariant, since Q scores are persona-level
+constants). The two off-diagonal blocks are the LLM×Q cross-correlations: the
+main diagonal of those blocks (LLM Aut×Q Aut, LLM Com×Q Com, LLM Rel×Q Rel)
+reflects convergent validity; off-diagonal cells reflect discriminant validity.
+
+```{r}
+#| label: fig-rq2b-crosscor-heatmap
+#| echo: false
+#| fig-cap: "6×6 cross-correlation matrix (LLM scores × questionnaire scores) per experimental condition (RQ2b). Upper-left block: within-LLM inter-need correlations. Lower-right block: within-questionnaire inter-need correlations (condition-invariant). Off-diagonal blocks: LLM × questionnaire cross-correlations; main diagonal of those blocks = convergent validity; off-diagonal = discriminant. Grey diagonal = 1.0 (suppressed). Rows = target word length; columns = number of texts."
+#| fig-width: 12
+#| fig-height: 12
+#| fig-dpi: 300
+
+VAR_LABELS_6 <- c("LLM Aut", "LLM Com", "LLM Rel", "Q Aut", "Q Com", "Q Rel")
+
+heat_crosscor_data <- purrr::map_dfr(CONDITIONS, function(cond) {
+  llm_cols <- paste0(c("llm_aut_mean_", "llm_com_mean_", "llm_rel_mean_"), cond)
+  q_cols   <- c("q_aut_mean", "q_com_mean", "q_rel_mean")
+
+  mat <- cor(
+    dplyr::select(wide_rq2, dplyr::all_of(c(llm_cols, q_cols))),
+    use = "pairwise.complete.obs"
+  )
+  dimnames(mat) <- list(VAR_LABELS_6, VAR_LABELS_6)
+
+  as.data.frame(as.table(mat), stringsAsFactors = FALSE) |>
+    dplyr::rename(var_row = Var1, var_col = Var2, r = Freq) |>
+    dplyr::mutate(condition = cond) |>
+    dplyr::as_tibble()
+}) |>
+  dplyr::left_join(condition_lookup, by = "condition") |>
+  dplyr::mutate(
+    var_col     = factor(var_col, levels = VAR_LABELS_6),
+    var_row_rev = factor(var_row, levels = rev(VAR_LABELS_6)),
+    is_diag     = var_row == var_col,
+    r_fill      = dplyr::if_else(is_diag, NA_real_, r),
+    r_label     = dplyr::if_else(is_diag, "—", sprintf("%.2f", r)),
+    txt_color   = dplyr::case_when(
+      is_diag       ~ "grey55",
+      abs(r) > 0.30 ~ "white",
+      TRUE          ~ "black"
+    ),
+    target_f = factor(
+      target_words,
+      levels = c(50L, 150L, 300L),
+      labels = c("Short (50w)", "Medium (150w)", "Long (300w)")
+    ),
+    text_f = factor(
+      text_count,
+      levels = c(1L, 3L, 5L),
+      labels = c("1 text", "3 texts", "5 texts")
+    )
+  ) |>
+  dplyr::filter(
+    match(var_row, VAR_LABELS_6) >= match(as.character(var_col), VAR_LABELS_6)
+  )
+
+ggplot(heat_crosscor_data,
+       aes(x = var_col, y = var_row_rev, fill = r_fill)) +
+  geom_tile(color = "white", linewidth = 0.6) +
+  geom_text(
+    aes(label = r_label, color = txt_color),
+    size = 2.4, family = THESIS_FONT
+  ) +
+  geom_hline(yintercept = 3.5, color = "grey35", linewidth = 0.9) +
+  geom_vline(xintercept = 3.5, color = "grey35", linewidth = 0.9) +
+  facet_grid(rows = vars(target_f), cols = vars(text_f)) +
+  scale_fill_gradient2(
+    low      = COL_HU_SHADES[1],
+    mid      = "white",
+    high     = COL_AI_SHADES[1],
+    midpoint = 0,
+    limits   = c(-0.6, 0.6),
+    na.value = "grey93",
+    name     = expression(paste("Pearson ", italic(r)))
+  ) +
+  scale_color_identity() +
+  labs(x = NULL, y = NULL) +
+  theme_minimal(base_size = THESIS_FONTSIZE) +
+  theme(
+    text             = element_text(family = THESIS_FONT),
+    axis.text.x      = element_text(angle = 45, hjust = 1, size = 8),
+    axis.text.y      = element_text(size = 8),
+    panel.grid       = element_blank(),
+    strip.text       = element_text(face = "plain"),
+    legend.position  = "bottom",
+    legend.key.width = unit(2, "cm")
+  )
+```
+
+### Cross-Correlation Table (Pearson, Fisher-z CIs)
+
+```{r}
+#| label: prep-crosscor-table-rq2b
+#| include: false
+
+VAR_LABELS_6 <- c("LLM Aut", "LLM Com", "LLM Rel", "Q Aut", "Q Com", "Q Rel")
+
+pair_meta <- tidyr::expand_grid(
+  row_i = seq_along(VAR_LABELS_6),
+  col_i = seq_along(VAR_LABELS_6)
+) |>
+  dplyr::filter(row_i > col_i) |>
+  dplyr::mutate(
+    row_var     = VAR_LABELS_6[row_i],
+    col_var     = VAR_LABELS_6[col_i],
+    col_nm      = sprintf("p%02d", dplyr::row_number()),
+    block_order = dplyr::case_when(
+      row_i <= 3L               ~ 1L,
+      row_i >= 4L & col_i >= 4L ~ 3L,
+      TRUE                      ~ 2L
+    ),
+    hdr = dplyr::case_when(
+      block_order == 1L ~ paste0(sub("LLM ", "", row_var), "×", sub("LLM ", "", col_var)),
+      block_order == 3L ~ paste0(sub("Q ", "Q.", row_var), "×", sub("Q ", "Q.", col_var)),
+      TRUE              ~ paste0(sub("Q ", "Q.", row_var), "×", sub("LLM ", "L.", col_var))
+    ),
+    is_convergent = row_i - col_i == 3L
+  ) |>
+  dplyr::arrange(block_order, row_i, col_i)
+
+fisher_fmt <- function(r, n, ci_level = CI_LEVEL) {
+  z    <- atanh(r)
+  se_z <- 1 / sqrt(n - 3L)
+  crit <- qnorm((1 + ci_level) / 2)
+  sprintf("%.2f [%.2f, %.2f]", r, tanh(z - crit * se_z), tanh(z + crit * se_z))
+}
+
+cond_order <- condition_lookup |>
+  dplyr::arrange(target_words, text_count) |>
+  dplyr::pull(condition)
+
+n_within_llm <- sum(pair_meta$block_order == 1L)
+n_cross      <- sum(pair_meta$block_order == 2L)
+n_within_q   <- sum(pair_meta$block_order == 3L)
+conv_j       <- which(pair_meta$is_convergent) + 1L
+
+hdr_values <- setNames(
+  as.list(c("Condition", pair_meta$hdr)),
+  c("Condition", pair_meta$col_nm)
+)
+```
+
+```{r}
+#| label: tbl-rq2b-crosscor-heatmap
+#| echo: false
+#| tbl-cap: "Cross-Correlation Matrix with 95% CIs: All 6×6 Lower-Triangle Pairs per Condition (RQ2b)"
+
+crosscor_rows <- purrr::map_dfr(cond_order, function(cond) {
+  lu       <- condition_lookup[condition_lookup$condition == cond, ]
+  llm_cols <- paste0(c("llm_aut_mean_", "llm_com_mean_", "llm_rel_mean_"), cond)
+  q_cols   <- c("q_aut_mean", "q_com_mean", "q_rel_mean")
+  all_cols <- c(llm_cols, q_cols)
+  df       <- dplyr::select(wide_rq2, dplyr::all_of(all_cols))
+  n        <- sum(complete.cases(df))
+  m        <- cor(df, use = "pairwise.complete.obs")
+  dimnames(m) <- list(VAR_LABELS_6, VAR_LABELS_6)
+
+  cells <- setNames(
+    purrr::map_chr(seq_len(nrow(pair_meta)), function(k)
+      fisher_fmt(m[pair_meta$row_var[k], pair_meta$col_var[k]], n)),
+    pair_meta$col_nm
+  )
+  tibble::tibble(
+    Condition = paste0(
+      dplyr::case_when(lu$target_words == 50L  ~ "Short (50w)",
+                       lu$target_words == 150L ~ "Medium (150w)",
+                       TRUE                    ~ "Long (300w)"),
+      " × ", lu$text_count,
+      dplyr::if_else(lu$text_count == 1L, " text", " texts")
+    )
+  ) |>
+    dplyr::bind_cols(as.data.frame(t(cells), stringsAsFactors = FALSE))
+})
+
+flextable::flextable(crosscor_rows) |>
+  flextable::set_header_labels(values = hdr_values) |>
+  flextable::add_header_row(
+    values    = c("", "Within LLM", "LLM × Questionnaire", "Within Q"),
+    colwidths = c(1L, n_within_llm, n_cross, n_within_q)
+  ) |>
+  flextable::align(i = 1L, align = "center", part = "header") |>
+  flextable::align(i = 2L, j = 2:16, align = "center", part = "header") |>
+  flextable::align(j = 2:16, align = "center", part = "body") |>
+  flextable::bold(j = conv_j, part = "body") |>
+  flextable::vline(
+    j      = c(1L + n_within_llm, 1L + n_within_llm + n_cross),
+    border = officer::fp_border(color = "grey60", width = 0.75),
+    part   = "body"
+  ) |>
+  style_apa7() |>
+  add_apa_note(paste0(
+    "N = ", nrow(wide_rq2), " AI surrogates. ",
+    "Values = Pearson r [95% CI]; CIs are Fisher-z intervals. ",
+    "Within LLM: inter-need correlations between LLM-scored dimensions ",
+    "(A× = Aut, C× = Com, R× = Rel). ",
+    "LLM × Questionnaire: cross-construct correlations; Q. = questionnaire subscale, L. = LLM dimension; ",
+    "bold = convergent validity (same need dimension). ",
+    "Within Q: inter-need correlations between questionnaire subscales (condition-invariant)."
+  )) |>
+  flextable::autofit()
+```
+
+### Spearman Cross-Correlation
+
+```{r}
+#| label: fig-rq2b-crosscor-heatmap-spearman
+#| echo: false
+#| fig-cap: "6×6 cross-correlation matrix (Spearman ρ, LLM scores × questionnaire scores) per experimental condition (RQ2b). Layout identical to Pearson version; values are rank-based. Upper-left block: within-LLM inter-need correlations. Lower-right block: within-questionnaire inter-need correlations (condition-invariant). Off-diagonal blocks: LLM × questionnaire cross-correlations (convergent = main diagonal; discriminant = off-diagonal). Grey diagonal = 1.0."
+#| fig-width: 12
+#| fig-height: 12
+#| fig-dpi: 300
+
+heat_crosscor_data_spearman <- purrr::map_dfr(CONDITIONS, function(cond) {
+  llm_cols <- paste0(c("llm_aut_mean_", "llm_com_mean_", "llm_rel_mean_"), cond)
+  q_cols   <- c("q_aut_mean", "q_com_mean", "q_rel_mean")
+
+  mat <- cor(
+    dplyr::select(wide_rq2, dplyr::all_of(c(llm_cols, q_cols))),
+    use    = "pairwise.complete.obs",
+    method = "spearman"
+  )
+  dimnames(mat) <- list(VAR_LABELS_6, VAR_LABELS_6)
+
+  as.data.frame(as.table(mat), stringsAsFactors = FALSE) |>
+    dplyr::rename(var_row = Var1, var_col = Var2, r = Freq) |>
+    dplyr::mutate(condition = cond) |>
+    dplyr::as_tibble()
+}) |>
+  dplyr::left_join(condition_lookup, by = "condition") |>
+  dplyr::mutate(
+    var_col     = factor(var_col, levels = VAR_LABELS_6),
+    var_row_rev = factor(var_row, levels = rev(VAR_LABELS_6)),
+    is_diag     = var_row == var_col,
+    r_fill      = dplyr::if_else(is_diag, NA_real_, r),
+    r_label     = dplyr::if_else(is_diag, "—", sprintf("%.2f", r)),
+    txt_color   = dplyr::case_when(
+      is_diag       ~ "grey55",
+      abs(r) > 0.30 ~ "white",
+      TRUE          ~ "black"
+    ),
+    target_f = factor(
+      target_words,
+      levels = c(50L, 150L, 300L),
+      labels = c("Short (50w)", "Medium (150w)", "Long (300w)")
+    ),
+    text_f = factor(
+      text_count,
+      levels = c(1L, 3L, 5L),
+      labels = c("1 text", "3 texts", "5 texts")
+    )
+  ) |>
+  dplyr::filter(
+    match(var_row, VAR_LABELS_6) >= match(as.character(var_col), VAR_LABELS_6)
+  )
+
+ggplot(heat_crosscor_data_spearman,
+       aes(x = var_col, y = var_row_rev, fill = r_fill)) +
+  geom_tile(color = "white", linewidth = 0.6) +
+  geom_text(
+    aes(label = r_label, color = txt_color),
+    size = 2.4, family = THESIS_FONT
+  ) +
+  geom_hline(yintercept = 3.5, color = "grey35", linewidth = 0.9) +
+  geom_vline(xintercept = 3.5, color = "grey35", linewidth = 0.9) +
+  facet_grid(rows = vars(target_f), cols = vars(text_f)) +
+  scale_fill_gradient2(
+    low      = COL_HU_SHADES[1],
+    mid      = "white",
+    high     = COL_AI_SHADES[1],
+    midpoint = 0,
+    limits   = c(-0.6, 0.6),
+    na.value = "grey93",
+    name     = "Spearman ρ"
+  ) +
+  scale_color_identity() +
+  labs(x = NULL, y = NULL) +
+  theme_minimal(base_size = THESIS_FONTSIZE) +
+  theme(
+    text             = element_text(family = THESIS_FONT),
+    axis.text.x      = element_text(angle = 45, hjust = 1, size = 8),
+    axis.text.y      = element_text(size = 8),
+    panel.grid       = element_blank(),
+    strip.text       = element_text(face = "plain"),
+    legend.position  = "bottom",
+    legend.key.width = unit(2, "cm")
+  )
+```
+
+```{r}
+#| label: tbl-rq2b-crosscor-heatmap-spearman
+#| echo: false
+#| tbl-cap: "Cross-Correlation Matrix with 95% CIs (Spearman ρ): All 6×6 Lower-Triangle Pairs per Condition (RQ2b)"
+
+crosscor_rows_spearman <- purrr::map_dfr(cond_order, function(cond) {
+  lu       <- condition_lookup[condition_lookup$condition == cond, ]
+  llm_cols <- paste0(c("llm_aut_mean_", "llm_com_mean_", "llm_rel_mean_"), cond)
+  q_cols   <- c("q_aut_mean", "q_com_mean", "q_rel_mean")
+  all_cols <- c(llm_cols, q_cols)
+  df       <- dplyr::select(wide_rq2, dplyr::all_of(all_cols))
+  n        <- sum(complete.cases(df))
+  m        <- cor(df, use = "pairwise.complete.obs", method = "spearman")
+  dimnames(m) <- list(VAR_LABELS_6, VAR_LABELS_6)
+
+  cells <- setNames(
+    purrr::map_chr(seq_len(nrow(pair_meta)), function(k)
+      fisher_fmt(m[pair_meta$row_var[k], pair_meta$col_var[k]], n)),
+    pair_meta$col_nm
+  )
+  tibble::tibble(
+    Condition = paste0(
+      dplyr::case_when(lu$target_words == 50L  ~ "Short (50w)",
+                       lu$target_words == 150L ~ "Medium (150w)",
+                       TRUE                    ~ "Long (300w)"),
+      " × ", lu$text_count,
+      dplyr::if_else(lu$text_count == 1L, " text", " texts")
+    )
+  ) |>
+    dplyr::bind_cols(as.data.frame(t(cells), stringsAsFactors = FALSE))
+})
+
+flextable::flextable(crosscor_rows_spearman) |>
+  flextable::set_header_labels(values = hdr_values) |>
+  flextable::add_header_row(
+    values    = c("", "Within LLM", "LLM × Questionnaire", "Within Q"),
+    colwidths = c(1L, n_within_llm, n_cross, n_within_q)
+  ) |>
+  flextable::align(i = 1L, align = "center", part = "header") |>
+  flextable::align(i = 2L, j = 2:16, align = "center", part = "header") |>
+  flextable::align(j = 2:16, align = "center", part = "body") |>
+  flextable::bold(j = conv_j, part = "body") |>
+  flextable::vline(
+    j      = c(1L + n_within_llm, 1L + n_within_llm + n_cross),
+    border = officer::fp_border(color = "grey60", width = 0.75),
+    part   = "body"
+  ) |>
+  style_apa7() |>
+  add_apa_note(paste0(
+    "N = ", nrow(wide_rq2), " AI surrogates. ",
+    "Values = Spearman ρ [95% CI]; CIs are Fisher-z intervals (approximate for ρ). ",
+    "Within LLM: inter-need correlations between LLM-scored dimensions ",
+    "(A× = Aut, C× = Com, R× = Rel). ",
+    "LLM × Questionnaire: cross-construct correlations; Q. = questionnaire subscale, L. = LLM dimension; ",
+    "bold = convergent validity (same need dimension). ",
+    "Within Q: inter-need correlations between questionnaire subscales (condition-invariant)."
+  )) |>
+  flextable::autofit()
+```
+
+---
+
+# 5 H1c — Discriminant Validity (AI Surrogates, All 9 Conditions)
+
+H1c requires that each LLM dimension correlates more strongly with its
+matching questionnaire dimension (convergent, r_within) than with
+non-matching dimensions (discriminant, r_cross). Tested via Steiger's
+(1980) dependent overlapping groups test (`cocor::cocor.dep.groups.overlap`).
+Six comparisons per condition × 9 conditions = 54 tests. All two-tailed.
+
+## 5.1 Steiger Tests
+
+```{r}
+#| label: result-h1c-ai
+#| echo: false
+#| cache: true
+#| cache.extra: !expr file.mtime(rds_paths$ai_cond)
+
+conditions_grid <- d_rq3_ai_conditions |>
+  distinct(target_words, text_count) |>
+  arrange(text_count, target_words)
+
+tbl_h1c_ai <- purrr::map_dfr(seq_len(nrow(conditions_grid)), function(i) {
+  n_t <- conditions_grid$text_count[i]
+  lbl <- paste0(n_t, ifelse(n_t == 1L, " text × ", " texts × "),
+                conditions_grid$target_words[i], "w")
+  sub <- filter(d_rq3_ai_conditions,
+                target_words == conditions_grid$target_words[i],
+                text_count   == conditions_grid$text_count[i])
+  bind_rows(
+    run_steiger_cond(sub, "llm_aut_mean", "q_aut_mean", "q_com_mean", "Q_Aut", "Q_Com", lbl),
+    run_steiger_cond(sub, "llm_aut_mean", "q_aut_mean", "q_rel_mean", "Q_Aut", "Q_Rel", lbl),
+    run_steiger_cond(sub, "llm_com_mean", "q_com_mean", "q_aut_mean", "Q_Com", "Q_Aut", lbl),
+    run_steiger_cond(sub, "llm_com_mean", "q_com_mean", "q_rel_mean", "Q_Com", "Q_Rel", lbl),
+    run_steiger_cond(sub, "llm_rel_mean", "q_rel_mean", "q_aut_mean", "Q_Rel", "Q_Aut", lbl),
+    run_steiger_cond(sub, "llm_rel_mean", "q_rel_mean", "q_com_mean", "Q_Rel", "Q_Com", lbl)
+  )
+})
+
+saveRDS(tbl_h1c_ai, file.path(EXPORT_DIR, "h1c_ai_results.rds"))
+message("h1c_ai_results saved (", nrow(tbl_h1c_ai), " rows).")
+```
+
+```{r}
+#| label: tbl-h1c-ai
+#| echo: false
+#| tbl-cap: "H1c: Discriminant Validity — Steiger's Test per Condition (AI Surrogates, N = 54 Tests)"
+
+tbl_h1c_ai |>
+  flextable() |>
+  style_apa7() |>
+  add_apa_note(paste0(
+    "Steiger (1980) test for dependent overlapping correlations ",
+    "(cocor::cocor.dep.groups.overlap). Two-tailed. ",
+    "r_within = LLM-matching Q correlation; r_cross = LLM-nonmatching Q correlation. ",
+    "CI = 95% Fisher-z CI on r_within - r_cross."
+  ))
+```
+
+## 5.2 H1c Heatmap
+
+```{r}
+#| label: fig-h1c-heatmap
+#| echo: false
+#| fig-cap: "H1c: LLM × Questionnaire Correlation Matrix per Condition (AI Surrogates). Bold border = convergent validity (same need, different method); no border = discriminant. Rows = target word length; columns = number of texts. Red = negative r, white = 0, blue = positive r."
+#| fig-width: 9
+#| fig-height: 9
+#| fig-dpi: 300
+
+h1c_mat <- dplyr::bind_rows(
+  tbl_h1c_ai |>
+    dplyr::group_by(condition, llm_dim) |>
+    dplyr::slice(1) |>
+    dplyr::ungroup() |>
+    dplyr::transmute(
+      condition, llm_dim,
+      q_dim   = sub("^(Q_\\w+) vs.*", "\\1", comparison),
+      r       = r_within, is_diag = TRUE
+    ),
+  tbl_h1c_ai |>
+    dplyr::transmute(
+      condition, llm_dim,
+      q_dim   = sub(".*vs (Q_\\w+)$", "\\1", comparison),
+      r       = r_cross,  is_diag = FALSE
+    )
+) |>
+  dplyr::mutate(
+    text_count   = as.integer(sub("^(\\d+) texts?.*", "\\1", condition)),
+    target_words = as.integer(sub("^.+ × (\\d+)w$",  "\\1", condition)),
+    llm_f  = factor(llm_dim,
+                    levels = c("llm_rel_mean", "llm_com_mean", "llm_aut_mean"),
+                    labels = c("LLM Rel",      "LLM Com",      "LLM Aut")),
+    q_f    = factor(q_dim,
+                    levels = c("Q_Aut", "Q_Com", "Q_Rel"),
+                    labels = c("Q Aut", "Q Com", "Q Rel")),
+    target_f = factor(target_words, levels = c(50L, 150L, 300L),
+                      labels = c("Short (50w)", "Medium (150w)", "Long (300w)")),
+    text_f   = factor(text_count, levels = c(1L, 3L, 5L),
+                      labels = c("1 text", "3 texts", "5 texts")),
+    r_label  = sprintf("%.2f", r),
+    txt_col  = if_else(abs(r) > 0.30, "white", "black")
+  )
+
+ggplot(h1c_mat, aes(x = q_f, y = llm_f, fill = r)) +
+  geom_tile(color = "white", linewidth = 0.6) +
+  geom_tile(data = dplyr::filter(h1c_mat, is_diag),
+            color = "black", linewidth = 1.2, fill = NA) +
+  geom_text(aes(label = r_label, color = txt_col),
+            size = 2.8, family = THESIS_FONT) +
+  scale_color_identity(guide = "none") +
+  scale_fill_gradient2(
+    low      = COL_HU_SHADES[1],
+    mid      = "white",
+    high     = COL_AI_SHADES[1],
+    midpoint = 0,
+    limits   = c(-0.6, 0.6),
+    oob      = scales::squish,
+    name     = expression(paste("Pearson ", italic(r)))
+  ) +
+  facet_grid(rows = vars(target_f), cols = vars(text_f)) +
+  labs(x = NULL, y = NULL) +
+  theme_minimal(base_size = THESIS_FONTSIZE) +
+  theme(
+    text             = element_text(family = THESIS_FONT),
+    axis.text.x      = element_text(angle = 45, hjust = 1, size = 8),
+    axis.text.y      = element_text(size = 8),
+    panel.grid       = element_blank(),
+    strip.text       = element_text(face = "plain"),
+    legend.position  = "bottom",
+    legend.key.width = unit(2, "cm")
+  )
+```
+
+## 5.3 H1c MTMM Dot Plot
+
+```{r}
+#| label: fig-h1c-mtmm
+#| echo: false
+#| fig-cap: "H1c: MTMM Validity Coefficient Comparison — Campbell-Fiske Criterion (AI Surrogates). Filled circle = convergent r (same need); open circles = discriminant r (non-matching Q dimensions). Discriminant validity holds when the filled circle lies to the right of all open circles in a row."
+#| fig-width: 10
+#| fig-height: 6
+#| fig-dpi: 300
+
+h1c_long <- dplyr::bind_rows(
+  tbl_h1c_ai |>
+    dplyr::group_by(condition, llm_dim) |>
+    dplyr::slice(1) |>
+    dplyr::ungroup() |>
+    dplyr::transmute(condition, llm_dim,
+                     q_dim  = sub("^(Q_\\w+) vs.*", "\\1", comparison),
+                     r_type = "Convergent", r = r_within),
+  tbl_h1c_ai |>
+    dplyr::transmute(condition, llm_dim,
+                     q_dim  = sub(".*vs (Q_\\w+)$", "\\1", comparison),
+                     r_type = "Discriminant", r = r_cross)
+) |>
+  dplyr::mutate(
+    text_count   = as.integer(sub("^(\\d+) texts?.*", "\\1", condition)),
+    target_words = as.integer(sub(".*(\\d+)w$",      "\\1", condition)),
+    llm_f  = factor(llm_dim,
+                    levels = c("llm_aut_mean", "llm_com_mean", "llm_rel_mean"),
+                    labels = c("LLM Autonomy", "LLM Competence", "LLM Relatedness")),
+    q_f    = factor(q_dim,
+                    levels = c("Q_Aut", "Q_Com", "Q_Rel"),
+                    labels = c("Q Aut", "Q Com", "Q Rel")),
+    cond_f = factor(
+      paste0(text_count, "t × ", target_words, "w"),
+      levels = paste0(rep(c(1L, 3L, 5L), each = 3L), "t × ",
+                      rep(c(50L, 150L, 300L), 3L), "w")
+    )
+  )
+
+ggplot(h1c_long,
+       aes(x = r, y = cond_f, group = interaction(r_type, q_f),
+           shape = r_type, color = q_f, size = r_type)) +
+  geom_vline(xintercept = 0, color = "grey70", linewidth = 0.3) +
+  geom_point(position = position_dodge(width = 0.6), alpha = 0.9) +
+  scale_shape_manual(values = c("Convergent" = 19L, "Discriminant" = 1L), name = NULL) +
+  scale_size_manual(values = c("Convergent" = 3.5, "Discriminant" = 2.5), guide = "none") +
+  scale_color_manual(
+    values = c("Q Aut" = COL_AI_SHADES[1], "Q Com" = COL_AI_SHADES[2],
+               "Q Rel" = COL_AI_SHADES[4]),
+    name = "Q dimension"
+  ) +
+  facet_wrap(~llm_f, ncol = 3L) +
+  labs(x = "Correlation (r)", y = NULL) +
+  theme_thesis()
+```
+
+## 5.4 H1c Spearman Robustness
+
+```{r}
+#| label: tbl-h1c-ai-spearman
+#| echo: false
+#| dependson: result-h1c-ai
+#| tbl-cap: "H1c Spearman Robustness: Steiger's Test with Spearman rho (AI Surrogates, N = 54 Tests; Approximation)"
+
+tbl_h1c_ai_spearman <- purrr::map_dfr(seq_len(nrow(conditions_grid)), function(i) {
+  n_t <- conditions_grid$text_count[i]
+  lbl <- paste0(n_t, ifelse(n_t == 1L, " text × ", " texts × "),
+                conditions_grid$target_words[i], "w")
+  sub <- filter(d_rq3_ai_conditions,
+                target_words == conditions_grid$target_words[i],
+                text_count   == conditions_grid$text_count[i])
+  bind_rows(
+    run_steiger_cond_spearman(sub, "llm_aut_mean", "q_aut_mean", "q_com_mean", "Q_Aut", "Q_Com", lbl),
+    run_steiger_cond_spearman(sub, "llm_aut_mean", "q_aut_mean", "q_rel_mean", "Q_Aut", "Q_Rel", lbl),
+    run_steiger_cond_spearman(sub, "llm_com_mean", "q_com_mean", "q_aut_mean", "Q_Com", "Q_Aut", lbl),
+    run_steiger_cond_spearman(sub, "llm_com_mean", "q_com_mean", "q_rel_mean", "Q_Com", "Q_Rel", lbl),
+    run_steiger_cond_spearman(sub, "llm_rel_mean", "q_rel_mean", "q_aut_mean", "Q_Rel", "Q_Aut", lbl),
+    run_steiger_cond_spearman(sub, "llm_rel_mean", "q_rel_mean", "q_com_mean", "Q_Rel", "Q_Com", lbl)
+  )
+})
+
+tbl_h1c_ai_spearman |>
+  flextable() |>
+  style_apa7() |>
+  add_apa_note("Steiger (1980) applied to Spearman rho — approximation; compare with Pearson results in tbl-h1c-ai.")
+```
+
+---
+
+# 6 H1d — Structural Consistency (AI Surrogates, All 9 Conditions)
+
+H1d asks whether the inter-need correlation pattern in LLM scores mirrors
+the pattern in questionnaire scores. Meta-r = Pearson r between the two
+3-element inter-need vectors (Aut–Com, Aut–Rel, Com–Rel). N = 3 pairs
+per condition — descriptive only; no inferential test applied.
+
+Questionnaire inter-need correlations are constant across conditions (Q
+scores do not vary by condition); condition-to-condition variation in
+meta-r reflects shifts in the LLM's inter-need structure.
+
+## 6.1 Meta-r Table
+
+```{r}
+#| label: compute-h1d-ai
+#| include: false
+#| cache: true
+#| dependson: result-h1c-ai
+#| cache.extra: !expr file.mtime(rds_paths$ai_cond)
+
+tbl_h1d_ai <- purrr::map_dfr(seq_len(nrow(conditions_grid)), function(i) {
+  n_t <- conditions_grid$text_count[i]
+  lbl <- paste0(n_t, ifelse(n_t == 1L, " text × ", " texts × "),
+                conditions_grid$target_words[i], "w")
+  sub <- filter(d_rq3_ai_conditions,
+                target_words == conditions_grid$target_words[i],
+                text_count   == conditions_grid$text_count[i])
+
+  q_vec <- c(
+    cor(sub$q_aut_mean, sub$q_com_mean, use = "complete.obs"),
+    cor(sub$q_aut_mean, sub$q_rel_mean, use = "complete.obs"),
+    cor(sub$q_com_mean, sub$q_rel_mean, use = "complete.obs")
+  )
+  llm_vec <- c(
+    cor(sub$llm_aut_mean, sub$llm_com_mean, use = "complete.obs"),
+    cor(sub$llm_aut_mean, sub$llm_rel_mean, use = "complete.obs"),
+    cor(sub$llm_com_mean, sub$llm_rel_mean, use = "complete.obs")
+  )
+
+  # meta_r stored in all rows (for downstream use); display chunk shows it once per condition
+  data.frame(
+    condition = lbl,
+    pair      = c("Aut-Com", "Aut-Rel", "Com-Rel"),
+    r_Q       = round(q_vec,   3),
+    r_LLM     = round(llm_vec, 2),
+    meta_r    = round(cor(q_vec, llm_vec), 2)
+  )
+})
+
+saveRDS(tbl_h1d_ai, file.path(EXPORT_DIR, "h1d_ai_results.rds"))
+message("h1d_ai_results saved (", nrow(tbl_h1d_ai), " rows).")
+```
+
+```{r}
+#| label: tbl-h1d-ai
+#| echo: false
+#| tbl-cap: "H1d: Structural Consistency — Inter-Need Correlations and Meta-r per Condition (AI Surrogates; N = 3 pairs, descriptive only)"
+
+# meta_r is a condition-level statistic; display it only in the first row per condition
+tbl_h1d_ai |>
+  dplyr::group_by(condition) |>
+  dplyr::mutate(meta_r = c(meta_r[1], NA_real_, NA_real_)) |>
+  dplyr::ungroup() |>
+  flextable() |>
+  flextable::colformat_num(j = "meta_r", na_str = "") |>
+  style_apa7() |>
+  add_apa_note(paste0(
+    "meta_r = Pearson r between the three Q inter-need correlations and three LLM ",
+    "inter-need correlations per condition (condition-level statistic, shown once). ",
+    "N = 3 pairs; no inferential test. Q inter-need correlations are constant across conditions."
+  ))
+```
+
+## 6.2 H1d Forest Plot
+
+```{r}
+#| label: fig-h1d-forestplot
+#| echo: false
+#| fig-cap: "H1d: LLM Inter-Need Correlations per Condition (AI Surrogates). Each point = one condition. Colour = number of texts (light to dark = 1, 3, 5). Dashed line = constant questionnaire inter-need r. Descriptive only; no inferential test (N = 3 pairs)."
+#| fig-width: 9
+#| fig-height: 5
+#| fig-dpi: 300
+
+H1D_COND_LEVELS <- c(
+  "1 text × 50w",  "1 text × 150w",  "1 text × 300w",
+  "3 texts × 50w", "3 texts × 150w", "3 texts × 300w",
+  "5 texts × 50w", "5 texts × 150w", "5 texts × 300w"
+)
+
+fig_h1d_forest <- tbl_h1d_ai |>
+  dplyr::mutate(
+    pair_f = factor(pair,
+                    levels = c("Aut-Com", "Aut-Rel", "Com-Rel"),
+                    labels = c("Autonomy–Competence",
+                               "Autonomy–Relatedness",
+                               "Competence–Relatedness")),
+    cond_f = factor(condition, levels = rev(H1D_COND_LEVELS)),
+    text_f = factor(
+      as.integer(sub("^(\\d+) texts?.*", "\\1", condition)),
+      levels = c(1L, 3L, 5L),
+      labels = c("1 text", "3 texts", "5 texts")
+    )
+  )
+
+q_refs_h1d <- fig_h1d_forest |> dplyr::distinct(pair_f, r_Q)
+
+ggplot(fig_h1d_forest, aes(x = r_LLM, y = cond_f, color = text_f)) +
+  geom_vline(xintercept = 0, color = "grey80", linewidth = 0.4) +
+  geom_vline(data = q_refs_h1d, aes(xintercept = r_Q),
+             linetype = "dashed", color = "grey40", linewidth = 0.6,
+             inherit.aes = FALSE) +
+  geom_point(size = 2.5) +
+  facet_wrap(~pair_f, ncol = 3L, scales = "free_x") +
+  scale_color_manual(values = COL_AI_TEXTS, name = "Number of texts") +
+  labs(x = "Inter-need correlation (r)", y = NULL) +
+  theme_thesis() +
+  theme(
+    panel.grid.major.y = element_line(linewidth = 0.2, color = "grey88"),
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor   = element_blank(),
+    legend.position    = "top"
+  )
+```
+
+## 6.3 H1d Spearman Robustness
+
+```{r}
+#| label: tbl-h1d-ai-spearman
+#| echo: false
+#| dependson: result-h1c-ai
+#| tbl-cap: "H1d Spearman Robustness: Inter-Need Rho and Meta-r per Condition (AI Surrogates; N = 3 pairs, descriptive only)"
+
+tbl_h1d_ai_spearman <- purrr::map_dfr(seq_len(nrow(conditions_grid)), function(i) {
+  n_t <- conditions_grid$text_count[i]
+  lbl <- paste0(n_t, ifelse(n_t == 1L, " text × ", " texts × "),
+                conditions_grid$target_words[i], "w")
+  sub <- filter(d_rq3_ai_conditions,
+                target_words == conditions_grid$target_words[i],
+                text_count   == conditions_grid$text_count[i])
+
+  q_vec <- c(
+    cor(sub$q_aut_mean, sub$q_com_mean, use = "complete.obs", method = "spearman"),
+    cor(sub$q_aut_mean, sub$q_rel_mean, use = "complete.obs", method = "spearman"),
+    cor(sub$q_com_mean, sub$q_rel_mean, use = "complete.obs", method = "spearman")
+  )
+  llm_vec <- c(
+    cor(sub$llm_aut_mean, sub$llm_com_mean, use = "complete.obs", method = "spearman"),
+    cor(sub$llm_aut_mean, sub$llm_rel_mean, use = "complete.obs", method = "spearman"),
+    cor(sub$llm_com_mean, sub$llm_rel_mean, use = "complete.obs", method = "spearman")
+  )
+
+  # meta-r stays Pearson on the 3-element rho vectors (rank-ordering 3 values is not meaningful)
+  # stored in all rows; display shows it once per condition
+  data.frame(
+    condition = lbl,
+    pair      = c("Aut-Com", "Aut-Rel", "Com-Rel"),
+    rho_Q     = round(q_vec,   3),
+    rho_LLM   = round(llm_vec, 2),
+    meta_r    = round(cor(q_vec, llm_vec), 2)
+  )
+})
+
+tbl_h1d_ai_spearman |>
+  dplyr::group_by(condition) |>
+  dplyr::mutate(meta_r = c(meta_r[1], NA_real_, NA_real_)) |>
+  dplyr::ungroup() |>
+  flextable() |>
+  flextable::colformat_num(j = "meta_r", na_str = "") |>
+  style_apa7() |>
+  add_apa_note("Spearman rho substituted throughout. meta-r remains Pearson on the 3-element rho vectors; shown once per condition.")
+```
+
+---
+
+# 7 LLM Scoring Reliability
+
+## 7.1 ICC(2,k=3) — Average Measures
+
+ICC(2,1) characterises the reliability of a *single* LLM scoring call. Because every downstream analysis (RQ2a SD, RQ2b correlations, RQ3) uses the **mean of k = 3 calls**, the directly relevant quantity is ICC(2,k=3): the expected reliability of that mean. Via the Spearman–Brown prophecy formula, ICC(2,k) = k × ICC(2,1) / [1 + (k − 1) × ICC(2,1)]. `psych::ICC()` computes this as `ICC2k` in the same call, so no additional API data are needed.
+
+```{r}
+#| label: tbl-llm-icc2k-results
+#| echo: false
+#| warning: false
+#| cache: true
+#| cache.extra: !expr file.mtime(data_path)
+#| tbl-cap: "LLM Scoring Reliability: Two-Way Random Effects, Absolute Agreement, Average of k = 3 Measures (ICC(2,3))"
+
+# 1. ICC2k Helper Function (Layer C) -------------------------------------------
+calc_condition_icc2k <- function(sub_data, score_var) {
+  wide_reps <- sub_data |>
+    dplyr::select(uuid, repeat_id, !!sym(score_var)) |>
+    tidyr::pivot_wider(
+      names_from  = repeat_id,
+      values_from = !!sym(score_var),
+      names_prefix = "draw_"
+    ) |>
+    dplyr::select(starts_with("draw_"))
+
+  icc_full_output <- psych::ICC(wide_reps, missing = TRUE)
+
+  # Extract ICC2k (Two-Way Random, Absolute Agreement, Average of k Measures)
+  res_row <- icc_full_output$results |>
+    dplyr::filter(type == "ICC2k") |>
+    dplyr::select(value = ICC, lo = `lower bound`, hi = `upper bound`)
+
+  return(res_row)
+}
+
+# 2. Execution Loop (Layer C) --------------------------------------------------
+icc2k_grid <- expand.grid(
+  cond = CONDITIONS,
+  need = c("llm_aut", "llm_com", "llm_rel"),
+  stringsAsFactors = FALSE
+)
+
+tbl_icc2k_raw <- icc2k_grid |>
+  purrr::pmap_dfr(function(cond, need) {
+    sub_df <- d |> dplyr::filter(condition == cond)
+    stats  <- calc_condition_icc2k(sub_df, need)
+
+    tibble::tibble(
+      Condition = cond,
+      Need      = need,
+      ICC       = stats$value,
+      CI_lo     = stats$lo,
+      CI_hi     = stats$hi
+    )
+  })
+
+# 3. Format for Thesis (Layer B) -----------------------------------------------
+tbl_icc2k_display <- tbl_icc2k_raw |>
+  mutate(
+    Need = case_match(Need,
+      "llm_aut" ~ TABLE_LABEL_AUT,
+      "llm_com" ~ TABLE_LABEL_COM,
+      "llm_rel" ~ TABLE_LABEL_REL
+    ),
+    Result = sprintf("%.2f [%.2f, %.2f]", ICC, CI_lo, CI_hi)
+  ) |>
+  dplyr::select(Condition, Need, Result) |>
+  tidyr::pivot_wider(names_from = Need, values_from = Result)
+
+# 4. Render Table (Layer B) ----------------------------------------------------
+tbl_icc2k_display |>
+  flextable() |>
+  style_apa7() |>
+  add_header_row(
+    values = c("", "ICC(2,3) [95% CI] (Two-Way Random, Absolute Agreement, k = 3)"),
+    colwidths = c(1, 3)
+  ) |>
+  align(i = 1, align = "center", part = "header") |>
+  add_apa_note(
+    paste0("Reliability of the mean of k = 3 scoring calls per condition (ICC2k). ",
+           "This is the ICC that corresponds to the measurement actually used in all ",
+           "downstream analyses. Calculated via psych::ICC(); equivalent to the ",
+           "Spearman–Brown adjustment of ICC(2,1) with k = 3.")
+  ) |>
+  autofit()
+```
+
+```{r}
+#| label: fig-icc2k-forest
+#| echo: false
+#| warning: false
+#| fig-cap: |
+#|   _LLM Scoring Reliability: ICC(2,3) with 95% CI by Condition and Need Dimension._
+#|   _Dashed lines mark conventional "good" (.75) and "excellent" (.90) thresholds._
+
+tbl_icc2k_raw |>
+  mutate(
+    Need = case_match(Need,
+      "llm_aut" ~ TABLE_LABEL_AUT,
+      "llm_com" ~ TABLE_LABEL_COM,
+      "llm_rel" ~ TABLE_LABEL_REL
+    ),
+    Condition = factor(Condition, levels = rev(CONDITIONS)),
+    y_num = as.numeric(Condition) + case_match(Need,
+      TABLE_LABEL_AUT ~ -0.22,
+      TABLE_LABEL_COM ~  0.00,
+      TABLE_LABEL_REL ~  0.22
+    )
+  ) |>
+  ggplot(aes(x = ICC, y = y_num, colour = Need)) +
+    geom_vline(xintercept = c(0.75, 0.90), linetype = "dashed", colour = "grey60", linewidth = 0.4) +
+    geom_errorbarh(aes(xmin = CI_lo, xmax = CI_hi), height = 0.15) +
+    geom_point(size = 2.5) +
+    scale_color_manual(values = COL_AI_LLM) +
+    scale_x_continuous(limits = c(0, 1), breaks = c(0, 0.25, 0.50, 0.75, 0.90, 1.00),
+                       labels = c("0", ".25", ".50", ".75", ".90", "1.00")) +
+    scale_y_continuous(breaks = seq_along(CONDITIONS), labels = rev(CONDITIONS)) +
+    labs(x = "ICC(2,3)", y = NULL, colour = "Need") +
+    theme_minimal(base_size = THESIS_FONTSIZE) +
+    theme(
+      legend.position    = "top",
+      panel.grid.minor   = element_blank(),
+      panel.grid.major.y = element_blank()
+    )
+```
+
+---
+
+# 8 Appendix: BCa Sensitivity Tables
+
+```{r}
+#| label: tbl-bca-sd-appendix
+#| echo: false
+#| tbl-cap: "Appendix: BCa vs Percentile CIs for SD — All 27 Condition × Need Cells"
+
+bca_sd_results |>
+  mutate(across(where(is.numeric), \(x) round(x, 3))) |>
+  flextable() |>
+  style_apa7() |>
+  add_apa_note("Divergence threshold = 0.02. Cells with max_diff > 0.02 also reported in check_bca_divergence_sd.")
+```
+
+```{r}
+#| label: tbl-bca-r-appendix
+#| echo: false
+#| tbl-cap: "Appendix: BCa vs Percentile CIs for Pearson r — All 27 Condition × Need Cells"
+
+bca_r_results |>
+  mutate(across(where(is.numeric), \(x) round(x, 3))) |>
+  flextable() |>
+  style_apa7() |>
+  add_apa_note("Divergence threshold = 0.02. Cells with max_diff > 0.02 also reported in check_bca_divergence_r.")
+```
+
+---
+
+# 9 Session Info
+
+```{r}
+#| label: session-info
+#| include: false
+
+sessionInfo()
+```
+
+---
+
+# 10 OLS Trend Figures
+
+OLS regression lines (pooled over text count) overlaid on shaded line
+plots from sections 3 and 4. OLS line (`linewidth = 2.5`) is drawn
+above all per-condition elements (connecting lines 0.2, error bars 0.8,
+point strokes 1.8).
+
+## 9.1 Between-Surrogate SD with OLS Trend (RQ2a)
+
+```{r}
+#| label: fig-rq2a-sd-lines-shaded-ols
+#| echo: false
+#| fig-cap: "Between-surrogate SD of surrogate-level mean LLM scores by condition (RQ2a). Lines = number of texts (1, 3, 5), shaded light to dark; x-axis = target word length (fully independent). Error bars = 95% bootstrap CIs. Red dashed line = pooled OLS fit across all 9 conditions within each need panel (sd ~ target_words, marginalised over text count)."
+#| fig-width: 10
+#| fig-height: 4
+#| fig-dpi: 600
+
+ggplot(fig_rq2a_data,
+       aes(x = target_words, y = sd,
+           group = text_count, color = text_count, fill = text_count)) +
+  geom_ribbon(aes(ymin = ci_lo, ymax = ci_hi), alpha = 0.07, color = NA, position = DODGE) +
+  geom_smooth(
+    aes(x = target_words, y = sd, group = 1, color = "OLS trend"),
+    inherit.aes = FALSE,
+    method      = "lm",
+    se          = FALSE,
+    fullrange   = TRUE,
+    linetype    = "dashed",
+    linewidth   = 1.0
+  ) +
+  geom_line(linewidth = 0.2, linetype = "solid", position = DODGE) +
+  geom_errorbar(aes(ymin = ci_lo, ymax = ci_hi), width = 0, linewidth = 0.8, position = DODGE) +
+  geom_point(shape = 21, fill = "white", size = 1.5, stroke = 1.8, position = DODGE) +
+  facet_wrap(~need, ncol = 3L) +
+  scale_x_continuous(
+    breaks = c(50L, 150L, 300L),
+    labels = c("Short\n(50)", "Medium\n(150)", "Long\n(300)"),
+    limits = c(0, 350)      # Explicitly set limits to include the +/- 50 padding
+#    expand = c(0, 0)         # Set to zero to prevent double-padding the new limits
+  ) +
+  scale_color_manual(
+    values = c(COL_AI_TEXTS, "OLS trend" = COL_HU_SHADES[2]),
+    #COL_HU_SHADES = c("#BE2A16", "#CE5545", "#DC7D71", "#E9A39B", "#F5C9C5","#FFFFFF")
+    breaks = c(as.character(N_TEXTS_VARIANTS), "OLS trend"),
+    name   = "Number of texts"
+  ) +
+  scale_fill_manual(values = COL_AI_TEXTS, name = "Number of texts", guide = "none") +
+  scale_y_continuous() +
+  coord_cartesian(ylim = c(0.2, 0.55)) +
+  guides(color = guide_legend(override.aes = list(
+    linetype  = c("solid", "solid", "solid", "dashed"),
+    linewidth = c(0.8, 0.8, 0.8, 1.0),
+    shape     = c(21, 21, 21, NA)
+  ))) +
+  labs(
+    x = "Target word length",
+    y = "Between-surrogate SD"
+  ) +
+  theme_minimal(base_size = THESIS_FONTSIZE + 2) +
+  theme(
+    text               = element_text(family = THESIS_FONT),
+    strip.text         = element_text(face = "plain", colour = "black", size = THESIS_FONTSIZE + 2),
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor.x = element_blank(),
+    panel.grid.major.y = element_line(linewidth = 0.3),
+    panel.grid.minor.y = element_line(linewidth = 0.3),
+    axis.title.x       = element_text(margin = margin(t = 12)),
+    axis.title.y       = element_text(margin = margin(r = 12)),
+    legend.position    = c(0.18, 0.2),
+    legend.direction   = "horizontal",
+    legend.margin      = margin(t = 4),
+    legend.background  = element_rect(fill = "white", color = NA),
+    legend.key         = element_blank(),
+    legend.title       = element_text(face = "plain")
+  )
+```
+
+*Note.* N = `r nrow(wide_rq2)` AI surrogates. Error bars = 95% bootstrap CIs (R = `r BOOTSTRAP_SAMPLES`). Line shading light to dark = 1, 3, 5 texts. Red dashed line = pooled OLS fit (marginalised over text count).
+
+## 9.2 Mean LLM Score with OLS Trend (RQ2a)
+
+```{r}
+#| label: fig-rq2a-mean-lines-shaded-ols
+#| echo: false
+#| warning: false
+#| fig-cap: "Mean LLM score (surrogate-level) by condition (RQ2a). Lines = number of texts (1, 3, 5), shaded light to dark; x-axis = target word length (fully independent). Red dashed line = pooled OLS fit across all 9 conditions within each need panel (mean ~ target_words, marginalised over text count)."
+#| fig-width: 10
+#| fig-height: 4
+#| fig-dpi: 600
+
+ggplot(fig_rq2a_mean_data,
+       aes(x = target_words, y = mean,
+           group = text_count, color = text_count)) +
+  geom_smooth(
+    aes(x = target_words, y = mean, group = 1, color = "OLS trend"),
+    inherit.aes = FALSE,
+    method      = "lm",
+    se          = FALSE,
+    fullrange   = TRUE,
+    linetype    = "dashed",
+    linewidth   = 1.0
+  ) +
+  geom_line(linewidth = 0.4, linetype = "solid", position = DODGE) +
+  geom_point(shape = 21, fill = "white", size = 1.5, stroke = 1.8, position = DODGE) +
+  facet_wrap(~need, ncol = 3L) +
+  scale_x_continuous(
+    breaks = c(50L, 150L, 300L),
+    labels = c("Short\n(50)", "Medium\n(150)", "Long\n(300)"),
+    limits = c(0, 350)      # Explicitly set limits to include the +/- 50 padding
+#    expand = c(0, 0)         # Set to zero to prevent double-padding the new limits
+#    expand = expansion(add = c(30, 30))
+  ) +
+  scale_y_continuous(limits = c(1, 5)) +
+  scale_color_manual(
+    values = c(COL_AI_TEXTS, "OLS trend" = COL_HU_SHADES[2]),
+    #COL_HU_SHADES = c("#BE2A16", "#CE5545", "#DC7D71", "#E9A39B", "#F5C9C5","#FFFFFF")
+    breaks = c(as.character(N_TEXTS_VARIANTS), "OLS trend"),
+    name   = "Number of texts"
+  ) +
+  guides(color = guide_legend(override.aes = list(
+    linetype  = c("solid", "solid", "solid", "dashed"),
+    linewidth = c(0.8, 0.8, 0.8, 1.0),
+    shape     = c(21, 21, 21, NA)
+  ))) +
+  labs(x = "Target word length", y = "Mean LLM score") +
+  theme_minimal(base_size = THESIS_FONTSIZE + 2) +
+  theme(
+    text                 = element_text(family = THESIS_FONT),
+    axis.title.x         = element_text(margin = margin(t = 12)),
+    axis.title.y         = element_text(margin = margin(r = 12)),
+    strip.text           = element_text(face = "plain", colour = "black", size = THESIS_FONTSIZE + 2),
+    panel.grid.major.x   = element_blank(),
+    panel.grid.minor.x   = element_blank(),
+    panel.grid.major.y   = element_line(linewidth = 0.3),
+    panel.grid.minor.y   = element_line(linewidth = 0.3),
+    legend.position      = c(0.1, 0.2),
+    legend.direction     = "horizontal",
+    legend.justification = c("left", "bottom"),
+    legend.background    = element_rect(fill = "white", color = NA),
+    legend.key           = element_blank(),
+    legend.title         = element_text(face = "plain")
+  )
+```
+
+*Note.* N = `r nrow(wide_rq2)` AI surrogates. Line shading light to dark = 1, 3, 5 texts. Red dashed line = pooled OLS fit (marginalised over text count).
+
+## 9.3 Pearson *r* with OLS Trend (RQ2b)
+
+```{r}
+#| label: fig-rq2b-r-lines-shaded-ols
+#| echo: false
+#| fig-cap: "Pearson r (LLM score vs. questionnaire subscale score) by condition (RQ2b). Lines = number of texts (1, 3, 5), shaded light to dark; x-axis = target word length (fully independent). Error bars = 95% bootstrap CIs. Red dashed line = pooled OLS fit across all 9 conditions within each need panel (r ~ target_words, marginalised over text count)."
+#| fig-width: 10
+#| fig-height: 4
+#| fig-dpi: 600
+
+ggplot(fig_rq2b_data,
+       aes(x = target_words, y = r,
+           group = text_count, color = text_count, fill = text_count)) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "grey60",
+             linewidth = 0.4) +
+  geom_ribbon(aes(ymin = ci_lo, ymax = ci_hi), alpha = 0.07, color = NA, position = DODGE) +
+  geom_smooth(
+    aes(x = target_words, y = r, group = 1, color = "OLS trend"),
+    inherit.aes = FALSE,
+    method      = "lm",
+    se          = FALSE,
+    fullrange   = TRUE,
+    linetype    = "dashed",
+    linewidth   = 1.0
+  ) +
+  geom_line(linewidth = 0.2, linetype = "solid", position = DODGE) +
+  geom_errorbar(aes(ymin = ci_lo, ymax = ci_hi), width = 0, linewidth = 0.8, position = DODGE) +
+  geom_point(shape = 21, fill = "white", size = 1.5, stroke = 1.8, position = DODGE) +
+  facet_wrap(~need, ncol = 3L) +
+  scale_x_continuous(
+    breaks = c(50L, 150L, 300L),
+    labels = c("Short\n(50)", "Medium\n(150)", "Long\n(300)"),
+    limits = c(0, 350)      # Explicitly set limits to include the +/- 50 padding
+#    expand = c(0, 0)         # Set to zero to prevent double-padding the new limits
+  ) +
+  scale_color_manual(
+    values = c(COL_AI_TEXTS, "OLS trend" = COL_HU_SHADES[2]),
+    #COL_HU_SHADES = c("#BE2A16", "#CE5545", "#DC7D71", "#E9A39B", "#F5C9C5","#FFFFFF")
+    breaks = c(as.character(N_TEXTS_VARIANTS), "OLS trend"),
+    name   = "Number of texts"
+  ) +
+  scale_fill_manual(values = COL_AI_TEXTS, name = "Number of texts", guide = "none") +
+  coord_cartesian(ylim = c(-0.35, 0.35)) +
+  guides(color = guide_legend(override.aes = list(
+    linetype  = c("solid", "solid", "solid", "dashed"),
+    linewidth = c(0.8, 0.8, 0.8, 1.0),
+    shape     = c(21, 21, 21, NA)
+  ))) +
+  labs(x = "Target word length", y = expression(paste("Pearson ", italic(r)))) +
+  theme_minimal(base_size = THESIS_FONTSIZE + 2) +
+  theme(
+    text               = element_text(family = THESIS_FONT),
+    strip.text         = element_text(face = "plain", colour = "black", size = THESIS_FONTSIZE + 2),
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor.x = element_blank(),
+    panel.grid.major.y = element_line(linewidth = 0.3),
+    panel.grid.minor.y = element_line(linewidth = 0.3),
+    axis.title.x       = element_text(margin = margin(t = 12)),
+    axis.title.y       = element_text(margin = margin(r = 12)),
+    legend.position    = c(0.28, 0.25),
+    legend.direction   = "horizontal",
+    legend.margin      = margin(t = 4),
+    legend.background  = element_rect(fill = "white", color = NA),
+    legend.key         = element_blank(),
+    legend.title       = element_text(face = "plain")
+  )
+```
+
+*Note.* N = `r nrow(wide_rq2)` AI surrogates. Error bars = 95% bootstrap CIs (R = `r BOOTSTRAP_SAMPLES`). Line shading light to dark = 1, 3, 5 texts. Red dashed line = pooled OLS fit (marginalised over text count).
+
+## 9.4 Spearman ρ with OLS Trend (RQ2b)
+
+```{r}
+#| label: fig-rq2b-rho-lines-shaded-ols
+#| echo: false
+#| fig-cap: "Spearman ρ (LLM score vs. questionnaire subscale score) by condition (RQ2b). Lines = number of texts (1, 3, 5), shaded light to dark; x-axis = target word length (fully independent). Error bars = 95% bootstrap CIs. Red dashed line = pooled OLS fit across all 9 conditions within each need panel (ρ ~ target_words, marginalised over text count)."
+#| fig-width: 10
+#| fig-height: 4
+#| fig-dpi: 600
+
+ggplot(fig_rq2b_rho_data,
+       aes(x = target_words, y = r,
+           group = text_count, color = text_count, fill = text_count)) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "grey60", linewidth = 0.4) +
+  geom_ribbon(aes(ymin = ci_lo, ymax = ci_hi), alpha = 0.07, color = NA, position = DODGE) +
+  geom_smooth(
+    aes(x = target_words, y = r, group = 1, color = "OLS trend"),
+    inherit.aes = FALSE,
+    method      = "lm",
+    se          = FALSE,
+    fullrange   = TRUE,
+    linetype    = "dashed",
+    linewidth   = 1.0
+  ) +
+  geom_line(linewidth = 0.2, linetype = "solid", position = DODGE) +
+  geom_errorbar(aes(ymin = ci_lo, ymax = ci_hi), width = 0, linewidth = 0.8, position = DODGE) +
+  geom_point(shape = 21, fill = "white", size = 1.5, stroke = 1.8, position = DODGE) +
+  facet_wrap(~need, ncol = 3L) +
+  scale_x_continuous(
+    breaks = c(50L, 150L, 300L),
+    labels = c("Short\n(50)", "Medium\n(150)", "Long\n(300)"),
+    limits = c(0, 350)      # Explicitly set limits to include the +/- 50 padding
+#    expand = c(0, 0)         # Set to zero to prevent double-padding the new limits
+  ) +
+  scale_color_manual(
+    values = c(COL_AI_TEXTS, "OLS trend" = COL_HU_SHADES[2]),
+    #COL_HU_SHADES = c("#BE2A16", "#CE5545", "#DC7D71", "#E9A39B", "#F5C9C5","#FFFFFF")
+    breaks = c(as.character(N_TEXTS_VARIANTS), "OLS trend"),
+    name   = "Number of texts"
+  ) +
+  scale_fill_manual(values = COL_AI_TEXTS, name = "Number of texts", guide = "none") +
+  coord_cartesian(ylim = c(-0.5, 0.5)) +
+  guides(color = guide_legend(override.aes = list(
+    linetype  = c("solid", "solid", "solid", "dashed"),
+    linewidth = c(0.8, 0.8, 0.8, 1.0),
+    shape     = c(21, 21, 21, NA)
+  ))) +
+  labs(x = "Target word length", y = "Spearman ρ") +
+  theme_minimal(base_size = THESIS_FONTSIZE + 2) +
+  theme(
+    text               = element_text(family = THESIS_FONT),
+    strip.text         = element_text(face = "plain", colour = "black", size = THESIS_FONTSIZE + 2),
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor.x = element_blank(),
+    panel.grid.major.y = element_line(linewidth = 0.3),
+    panel.grid.minor.y = element_line(linewidth = 0.3),
+    axis.title.x       = element_text(margin = margin(t = 12)),
+    axis.title.y       = element_text(margin = margin(r = 12)),
+    legend.position    = c(0.28, 0.15),
+    legend.direction   = "horizontal",
+    legend.margin      = margin(t = 4),
+    legend.background  = element_rect(fill = "white", color = NA),
+    legend.key         = element_blank(),
+    legend.title       = element_text(face = "plain")
+  )
+```
+
+*Note.* N = `r nrow(wide_rq2)` AI surrogates. Error bars = 95% bootstrap CIs (R = `r POLY_BOOT_R_RQ2`). Line shading light to dark = 1, 3, 5 texts. Red dashed line = pooled OLS fit (marginalised over text count).

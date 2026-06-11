@@ -1,0 +1,824 @@
+---
+title: "Additional Analyses — H1c/H1d: Human Discriminant Validity and Structural Consistency"
+subtitle: "Steiger's Test · Meta-r · Spearman Robustness · AI Surrogate Context"
+author: "Caroline Müller"
+date: "2026-05-17"
+format:
+  html:
+    code-fold: true
+    code-summary: "Show code"
+    code-tools: true
+    toc: true
+    self-contained: true
+    fig-cap-location: top
+editor:
+  markdown:
+    wrap: 72
+knitr:
+  opts_chunk:
+    dpi: 300
+---
+
+# 1 Overview
+
+**Prerequisites:** Run the following files first:
+
+- `10_RQ2_data.qmd` → `d_rq3_ai_conditions.rds`
+- `20_RQ2_analyses.qmd` → `h1c_ai_results.rds`, `h1d_ai_results.rds`
+- `30_RQ3_data.qmd` → `d_human_clean.rds`, `d_rq3_merged.rds`
+
+This file covers H1c (discriminant validity) and H1d (structural
+consistency) for the **human** participant sample, with AI surrogate
+results loaded from pre-computed RDS files as context. Sections 3 and 4
+follow a parallel structure:
+
+1. **AI surrogate context** — loaded from RDS (all 9 conditions)
+2. **Human analysis** — computed here (matched short-3 condition)
+3. **Comparison** — human vs AI short-3 condition side by side
+4. **Spearman robustness** — same tests with Spearman ρ as approximation
+
+**Note on questionnaire items:** Human Q-Relatedness is scored from 5
+items (`q_rel_1`–`q_rel_5`), while AI Q-Relatedness uses 4 items.
+This difference is inherited from the data preparation step and is
+explicitly noted wherever it affects interpretation.
+
+**Note on human condition:** All human participants were assessed in the
+matched short-3 condition (target words = 50, text count = 3). H1c and
+H1d results for humans are therefore based on a single condition.
+
+---
+
+# 2 Setup
+
+## 2.1 Environment
+
+```{r}
+#| label: setup-environment
+#| include: false
+#| warning: false
+
+graphics.off()
+
+suppressPackageStartupMessages({
+  library(dplyr)
+  library(tidyr)
+  library(purrr)
+  library(ggplot2)
+  library(flextable)
+  library(officer)
+  library(scales)
+  library(systemfonts)
+  library(ragg)
+  library(cocor)
+})
+
+knitr::opts_chunk$set(dev = "ragg_png")
+if (.Platform$OS.type == "windows") windowsFonts(Calibri = windowsFont("Calibri"))
+
+message("Libraries loaded.")
+```
+
+## 2.2 Shared Constants
+
+```{r}
+#| label: setup-common
+#| include: false
+
+source("00_common.R")
+```
+
+## 2.3 Load Upstream Exports
+
+```{r}
+#| label: setup-imports
+#| include: false
+
+EXPORT_DIR <- "../10_data/80_analyses_exports"
+
+rds_paths <- list(
+  human_clean = file.path(EXPORT_DIR, "d_human_clean.rds"),
+  merged      = file.path(EXPORT_DIR, "d_rq3_merged.rds"),
+  h1c_ai      = file.path(EXPORT_DIR, "h1c_ai_results.rds"),
+  h1d_ai      = file.path(EXPORT_DIR, "h1d_ai_results.rds"),
+  ai_cond     = file.path(EXPORT_DIR, "d_rq3_ai_conditions.rds")
+)
+
+for (nm in names(rds_paths)) {
+  if (!file.exists(rds_paths[[nm]])) {
+    stop("Missing upstream export: ", rds_paths[[nm]],
+         "\nRun the prerequisite QMD files listed in Section 1.")
+  }
+}
+
+d_human_clean        <- readRDS(rds_paths$human_clean)
+d_rq3_merged         <- readRDS(rds_paths$merged)
+h1c_ai_results       <- readRDS(rds_paths$h1c_ai)
+h1d_ai_results       <- readRDS(rds_paths$h1d_ai)
+d_rq3_ai_conditions  <- readRDS(rds_paths$ai_cond)
+
+N_HU         <- nrow(d_human_clean)
+N_AI_MATCHED <- sum(d_rq3_merged$id_type == "AI")
+
+message("Imports loaded: ", N_HU, " human rows; ",
+        N_AI_MATCHED, " AI short-3 rows; ",
+        nrow(h1c_ai_results), " AI H1c rows; ",
+        nrow(h1d_ai_results), " AI H1d rows; ",
+        nrow(d_rq3_ai_conditions), " AI condition rows.")
+```
+
+---
+
+# 3 H1c — Discriminant Validity
+
+H1c requires that each LLM score dimension correlates more strongly with
+its matching questionnaire dimension (convergent, r_within) than with
+non-matching dimensions (discriminant, r_cross). Steiger's (1980) test
+for dependent overlapping correlations (`cocor::cocor.dep.groups.overlap`)
+is used because all three correlation inputs share the same LLM score.
+Six comparisons per sample: each of three LLM dimensions compared against
+both non-matching Q dimensions. All tests two-tailed.
+
+The Steiger helpers (`run_steiger_cond`, `run_steiger_cond_spearman`) are
+defined in `00_common.R`. CI SE is back-computed from the cocor z-statistic
+to ensure consistency between the p-value and the interval.
+
+## 3.1 AI Surrogate Context
+
+AI H1c results across all 9 conditions are loaded from
+`h1c_ai_results.rds` (computed in `20_RQ2_analyses.qmd`). The MTMM plot
+below shows the convergent vs discriminant r pattern for each condition
+and LLM dimension.
+
+```{r}
+#| label: fig-h1c-ai-context-mtmm
+#| echo: false
+#| fig-cap: "H1c Context: MTMM Validity Coefficient Comparison — AI Surrogates, All 9 Conditions. Filled circle = convergent r (same need); open circles = discriminant r. Discriminant validity holds when the filled circle lies to the right of all open circles in a row."
+#| fig-width: 10
+#| fig-height: 6
+#| fig-dpi: 300
+
+h1c_ai_long <- dplyr::bind_rows(
+  h1c_ai_results |>
+    dplyr::group_by(condition, llm_dim) |>
+    dplyr::slice(1) |>
+    dplyr::ungroup() |>
+    dplyr::transmute(
+      condition, llm_dim,
+      q_dim  = sub("^(Q_\\w+) vs.*", "\\1", comparison),
+      r_type = "Convergent", r = r_within
+    ),
+  h1c_ai_results |>
+    dplyr::transmute(
+      condition, llm_dim,
+      q_dim  = sub(".*vs (Q_\\w+)$", "\\1", comparison),
+      r_type = "Discriminant", r = r_cross
+    )
+) |>
+  dplyr::mutate(
+    text_count   = as.integer(sub("^(\\d+) texts?.*", "\\1", condition)),
+    target_words = as.integer(sub(".*(\\d+)w$",        "\\1", condition)),
+    llm_f = factor(llm_dim,
+                   levels = c("llm_aut_mean", "llm_com_mean", "llm_rel_mean"),
+                   labels = c("LLM Autonomy", "LLM Competence", "LLM Relatedness")),
+    q_f   = factor(q_dim,
+                   levels = c("Q_Aut", "Q_Com", "Q_Rel"),
+                   labels = c("Q Aut", "Q Com", "Q Rel")),
+    cond_f = factor(
+      paste0(text_count, "t × ", target_words, "w"),
+      levels = paste0(rep(c(1L, 3L, 5L), each = 3L), "t × ",
+                      rep(c(50L, 150L, 300L), 3L), "w")
+    )
+  )
+
+ggplot(h1c_ai_long,
+       aes(x = r, y = cond_f, group = interaction(r_type, q_f),
+           shape = r_type, color = q_f, size = r_type)) +
+  geom_vline(xintercept = 0, color = "grey70", linewidth = 0.3) +
+  geom_point(position = position_dodge(width = 0.6), alpha = 0.9) +
+  scale_shape_manual(values = c("Convergent" = 19L, "Discriminant" = 1L), name = NULL) +
+  scale_size_manual(values = c("Convergent" = 3.5, "Discriminant" = 2.5), guide = "none") +
+  scale_color_manual(
+    values = c("Q Aut" = COL_AI_SHADES[1], "Q Com" = COL_AI_SHADES[2],
+               "Q Rel" = COL_AI_SHADES[4]),
+    name = "Q dimension"
+  ) +
+  facet_wrap(~llm_f, ncol = 3L) +
+  labs(x = "Correlation (r)", y = NULL) +
+  theme_thesis()
+```
+
+## 3.2 Human H1c Analysis
+
+Six Steiger tests on `d_human_clean` (N = `r N_HU`). Human condition:
+short-3 (target words = 50, text count = 3). **Note:** Q-Relatedness
+for humans uses 5 items (`q_rel_1`–`q_rel_5`); AI uses 4. This applies
+to both `q_rel_mean` (the composite mean used in all correlations below)
+and to the inter-need correlations involving relatedness.
+
+```{r}
+#| label: compute-h1c-human
+#| include: false
+
+HU_COND_LABEL <- "Human (short-3)"
+
+tbl_h1c_human <- dplyr::bind_rows(
+  run_steiger_cond(d_human_clean, "llm_aut_mean", "q_aut_mean", "q_com_mean",
+                   "Q_Aut", "Q_Com", HU_COND_LABEL),
+  run_steiger_cond(d_human_clean, "llm_aut_mean", "q_aut_mean", "q_rel_mean",
+                   "Q_Aut", "Q_Rel", HU_COND_LABEL),
+  run_steiger_cond(d_human_clean, "llm_com_mean", "q_com_mean", "q_aut_mean",
+                   "Q_Com", "Q_Aut", HU_COND_LABEL),
+  run_steiger_cond(d_human_clean, "llm_com_mean", "q_com_mean", "q_rel_mean",
+                   "Q_Com", "Q_Rel", HU_COND_LABEL),
+  run_steiger_cond(d_human_clean, "llm_rel_mean", "q_rel_mean", "q_aut_mean",
+                   "Q_Rel", "Q_Aut", HU_COND_LABEL),
+  run_steiger_cond(d_human_clean, "llm_rel_mean", "q_rel_mean", "q_com_mean",
+                   "Q_Rel", "Q_Com", HU_COND_LABEL)
+)
+
+message("H1c human: ", nrow(tbl_h1c_human), " Steiger tests computed.")
+```
+
+```{r}
+#| label: tbl-h1c-human
+#| echo: false
+#| tbl-cap: "H1c: Discriminant Validity — Steiger's Test for Human Participants (Short-3 Condition, N = 6 Tests)"
+
+tbl_h1c_human |>
+  dplyr::select(-condition) |>
+  flextable() |>
+  flextable::set_header_labels(
+    llm_dim    = "LLM dim",
+    comparison = "Comparison",
+    r_within   = "r_within",
+    r_cross    = "r_cross",
+    diff       = "Diff",
+    ci_lo      = "CI lo",
+    ci_hi      = "CI hi",
+    steiger_z  = "z",
+    p_value    = "p",
+    n          = "N"
+  ) |>
+  style_apa7() |>
+  add_apa_note(paste0(
+    "Steiger (1980) test for dependent overlapping correlations ",
+    "(cocor::cocor.dep.groups.overlap). Two-tailed. N = ", N_HU, ". ",
+    "r_within = LLM-matching Q correlation (convergent); ",
+    "r_cross = LLM-nonmatching Q correlation (discriminant). ",
+    "CI = 95% Fisher-z CI on r_within − r_cross. ",
+    "Q-Relatedness: 5 items for humans (vs 4 for AI surrogates)."
+  ))
+```
+
+```{r}
+#| label: fig-h1c-human-mtmm
+#| echo: false
+#| fig-cap: "H1c: MTMM Validity Coefficient Comparison — Human Participants (Short-3 Condition). Filled circle = convergent r; open circles = discriminant r. Discriminant validity holds when the filled circle lies to the right of all open circles in each panel."
+#| fig-width: 8
+#| fig-height: 3.5
+#| fig-dpi: 300
+
+h1c_human_long <- dplyr::bind_rows(
+  tbl_h1c_human |>
+    dplyr::group_by(llm_dim) |>
+    dplyr::slice(1) |>
+    dplyr::ungroup() |>
+    dplyr::transmute(
+      llm_dim,
+      q_dim  = sub("^(Q_\\w+) vs.*", "\\1", comparison),
+      r_type = "Convergent", r = r_within
+    ),
+  tbl_h1c_human |>
+    dplyr::transmute(
+      llm_dim,
+      q_dim  = sub(".*vs (Q_\\w+)$", "\\1", comparison),
+      r_type = "Discriminant", r = r_cross
+    )
+) |>
+  dplyr::mutate(
+    llm_f = factor(llm_dim,
+                   levels = c("llm_aut_mean", "llm_com_mean", "llm_rel_mean"),
+                   labels = c("LLM Autonomy", "LLM Competence", "LLM Relatedness")),
+    q_f   = factor(q_dim,
+                   levels = c("Q_Aut", "Q_Com", "Q_Rel"),
+                   labels = c("Q Aut", "Q Com", "Q Rel"))
+  )
+
+ggplot(h1c_human_long,
+       aes(x = r, y = q_f, shape = r_type, color = q_f, size = r_type)) +
+  geom_vline(xintercept = 0, color = "grey70", linewidth = 0.3) +
+  geom_point(alpha = 0.9) +
+  scale_shape_manual(values = c("Convergent" = 19L, "Discriminant" = 1L), name = NULL) +
+  scale_size_manual(values = c("Convergent" = 3.5, "Discriminant" = 2.5), guide = "none") +
+  scale_color_manual(
+    values = c("Q Aut" = COL_AI_SHADES[1], "Q Com" = COL_AI_SHADES[2],
+               "Q Rel" = COL_AI_SHADES[4]),
+    name = "Q dimension"
+  ) +
+  facet_wrap(~llm_f, ncol = 3L) +
+  labs(x = "Correlation (r)", y = "Q dimension") +
+  theme_thesis()
+```
+
+## 3.3 Comparison: Human vs AI Short-3
+
+```{r}
+#| label: tbl-h1c-compare
+#| echo: false
+#| tbl-cap: "H1c Comparison: Human vs AI Surrogates (Matched Short-3 Condition, target words = 50, text count = 3)"
+
+# AI short-3 rows: filter by condition matching "3 texts × 50w"
+AI_SHORT3_LABEL <- paste0("3 texts × 50w")  # "3 texts × 50w" — must match label built in 20_RQ2_analyses.qmd
+h1c_ai_short3 <- h1c_ai_results |>
+  dplyr::filter(condition == AI_SHORT3_LABEL)
+
+tbl_h1c_compare <- dplyr::bind_rows(
+  h1c_ai_short3   |> dplyr::mutate(Group = "AI (short-3)"),
+  tbl_h1c_human   |> dplyr::mutate(Group = "Human (short-3)")
+) |>
+  dplyr::select(Group, llm_dim, comparison, r_within, r_cross,
+                diff, ci_lo, ci_hi, steiger_z, p_value, n) |>
+  dplyr::arrange(comparison, Group)
+
+tbl_h1c_compare |>
+  flextable() |>
+  flextable::set_header_labels(
+    Group      = "Group",
+    llm_dim    = "LLM dim",
+    comparison = "Comparison",
+    r_within   = "r_within",
+    r_cross    = "r_cross",
+    diff       = "Diff",
+    ci_lo      = "CI lo",
+    ci_hi      = "CI hi",
+    steiger_z  = "z",
+    p_value    = "p",
+    n          = "N"
+  ) |>
+  style_apa7() |>
+  add_apa_note(paste0(
+    "AI short-3 results from h1c_ai_results.rds (computed in 20_RQ2_analyses.qmd). ",
+    "Human short-3 results computed above (Section 3.2). ",
+    "Q-Relatedness: AI = 4 items; Human = 5 items."
+  ))
+```
+
+## 3.4 Spearman Robustness
+
+Steiger's (1980) test is designed for Pearson r; applying it to Spearman
+ρ is an approximation. All other test parameters are identical to
+Section 3.2.
+
+```{r}
+#| label: compute-h1c-human-spearman
+#| include: false
+
+tbl_h1c_human_spearman <- dplyr::bind_rows(
+  run_steiger_cond_spearman(d_human_clean, "llm_aut_mean", "q_aut_mean", "q_com_mean",
+                            "Q_Aut", "Q_Com", HU_COND_LABEL),
+  run_steiger_cond_spearman(d_human_clean, "llm_aut_mean", "q_aut_mean", "q_rel_mean",
+                            "Q_Aut", "Q_Rel", HU_COND_LABEL),
+  run_steiger_cond_spearman(d_human_clean, "llm_com_mean", "q_com_mean", "q_aut_mean",
+                            "Q_Com", "Q_Aut", HU_COND_LABEL),
+  run_steiger_cond_spearman(d_human_clean, "llm_com_mean", "q_com_mean", "q_rel_mean",
+                            "Q_Com", "Q_Rel", HU_COND_LABEL),
+  run_steiger_cond_spearman(d_human_clean, "llm_rel_mean", "q_rel_mean", "q_aut_mean",
+                            "Q_Rel", "Q_Aut", HU_COND_LABEL),
+  run_steiger_cond_spearman(d_human_clean, "llm_rel_mean", "q_rel_mean", "q_com_mean",
+                            "Q_Rel", "Q_Com", HU_COND_LABEL)
+)
+
+message("H1c human Spearman: ", nrow(tbl_h1c_human_spearman), " tests computed.")
+```
+
+```{r}
+#| label: tbl-h1c-human-spearman
+#| echo: false
+#| tbl-cap: "H1c Spearman Robustness: Steiger's Test with Spearman rho — Human Participants (Short-3 Condition; Approximation)"
+
+tbl_h1c_human_spearman |>
+  dplyr::select(-condition) |>
+  flextable() |>
+  flextable::set_header_labels(
+    llm_dim    = "LLM dim",
+    comparison = "Comparison",
+    rho_within = "rho_within",
+    rho_cross  = "rho_cross",
+    diff       = "Diff",
+    ci_lo      = "CI lo",
+    ci_hi      = "CI hi",
+    steiger_z  = "z",
+    p_value    = "p",
+    n          = "N"
+  ) |>
+  style_apa7() |>
+  add_apa_note(paste0(
+    "Steiger (1980) applied to Spearman rho — approximation; ",
+    "compare with Pearson results in tbl-h1c-human. N = ", N_HU, "."
+  ))
+```
+
+---
+
+# 4 H1d — Structural Consistency
+
+H1d asks whether the inter-need correlation pattern in LLM scores
+mirrors the pattern in questionnaire scores. Three inter-need Pearson r
+values are computed for each source (Q and LLM): Aut–Com, Aut–Rel,
+Com–Rel. The meta-correlation (meta-r) is the Pearson r between these
+two 3-element vectors. N = 3 data points — no inferential test is
+applied; results are descriptive only.
+
+**Note:** Q inter-need correlations for AI surrogates are constant
+across conditions (Q scores come from one questionnaire administration
+per persona, independent of scoring condition). For humans there is only
+one condition (short-3), so meta-r is a single value.
+
+## 4.1 AI Surrogate Context
+
+AI meta-r values per condition (from `h1d_ai_results.rds`) are shown
+below to provide context before the human result. Condition-to-condition
+variation reflects shifts in the LLM's inter-need structure across text
+length and count.
+
+```{r}
+#| label: tbl-h1d-ai-summary
+#| echo: false
+#| tbl-cap: "H1d Context: AI Surrogate Meta-r by Condition (N = 9 Conditions, Descriptive Only)"
+
+h1d_ai_results |>
+  dplyr::distinct(condition, meta_r) |>
+  dplyr::mutate(
+    text_count   = as.integer(sub("^(\\d+) texts?.*", "\\1", condition)),
+    target_words = as.integer(sub(".*(\\d+)w$", "\\1", condition))
+  ) |>
+  dplyr::arrange(text_count, target_words) |>
+  dplyr::select(Condition = condition, `Meta-r` = meta_r) |>
+  flextable() |>
+  style_apa7() |>
+  add_apa_note(paste0(
+    "meta_r = Pearson r between three Q inter-need correlations and three LLM ",
+    "inter-need correlations per condition. N = 3 pairs; descriptive only. ",
+    "Loaded from h1d_ai_results.rds (computed in 20_RQ2_analyses.qmd)."
+  ))
+```
+
+```{r}
+#| label: fig-h1d-ai-context-forest
+#| echo: false
+#| fig-cap: "H1d Context: Inter-Need Correlations by Instrument, Source, and Condition (Pearson r, 95% CI). Each row is one source: human participants (top, separated by dashed line) or one of the nine AI surrogate conditions. Within each row, two points show the questionnaire inter-need correlation (Q, amber) and the LLM inter-need correlation (LLM, teal). Error bars = 95% CI via Fisher z-transform. AI questionnaire correlations are constant across conditions (same personas, same Q scores). Descriptive only."
+#| fig-width: 10
+#| fig-height: 6
+#| fig-dpi: 300
+
+# ── helper: Pearson r with 95% CI (Fisher z) ─────────────────────────────────
+.r_ci <- function(x, y, conf = 0.95) {
+  cc   <- complete.cases(x, y)
+  n    <- sum(cc)
+  r    <- cor(x[cc], y[cc])
+  z    <- atanh(r)
+  se   <- 1 / sqrt(n - 3)
+  crit <- qnorm((1 + conf) / 2)
+  data.frame(r = r, ci_lo = tanh(z - crit * se), ci_hi = tanh(z + crit * se), n = n)
+}
+
+.pairs <- list(
+  list(suf1 = "aut", suf2 = "com", label = "Autonomy–Competence"),
+  list(suf1 = "aut", suf2 = "rel", label = "Autonomy–Relatedness"),
+  list(suf1 = "com", suf2 = "rel", label = "Competence–Relatedness")
+)
+
+# ── AI conditions ─────────────────────────────────────────────────────────────
+.ai_grid <- d_rq3_ai_conditions |>
+  dplyr::distinct(target_words, text_count) |>
+  dplyr::arrange(text_count, target_words)
+
+.ai_rows <- purrr::map_dfr(seq_len(nrow(.ai_grid)), function(i) {
+  lbl <- paste0(.ai_grid$text_count[i], "t × ", .ai_grid$target_words[i], "w")
+  sub <- dplyr::filter(d_rq3_ai_conditions,
+                       target_words == .ai_grid$target_words[i],
+                       text_count   == .ai_grid$text_count[i])
+  purrr::map_dfr(.pairs, function(p) {
+    dplyr::bind_rows(
+      .r_ci(sub[[paste0("q_",   p$suf1, "_mean")]],
+            sub[[paste0("q_",   p$suf2, "_mean")]]) |>
+        dplyr::mutate(instrument = "Questionnaire"),
+      .r_ci(sub[[paste0("llm_", p$suf1, "_mean")]],
+            sub[[paste0("llm_", p$suf2, "_mean")]]) |>
+        dplyr::mutate(instrument = "LLM Score")
+    ) |> dplyr::mutate(source = lbl, source_type = "AI Surrogate", pair = p$label)
+  })
+})
+
+# ── Human ─────────────────────────────────────────────────────────────────────
+.hu_rows <- purrr::map_dfr(.pairs, function(p) {
+  dplyr::bind_rows(
+    .r_ci(d_human_clean[[paste0("q_",   p$suf1, "_mean")]],
+          d_human_clean[[paste0("q_",   p$suf2, "_mean")]]) |>
+      dplyr::mutate(instrument = "Questionnaire"),
+    .r_ci(d_human_clean[[paste0("llm_", p$suf1, "_mean")]],
+          d_human_clean[[paste0("llm_", p$suf2, "_mean")]]) |>
+      dplyr::mutate(instrument = "LLM Score")
+  ) |> dplyr::mutate(source = "Human (short-3)", source_type = "Human", pair = p$label)
+})
+
+# ── factor ordering: AI bottom-to-top, Human at top ──────────────────────────
+.ai_levels <- paste0(rep(c(1L, 3L, 5L), each = 3L), "t × ",
+                     rep(c(50L, 150L, 300L), 3L), "w")
+
+.forest_data <- dplyr::bind_rows(.ai_rows, .hu_rows) |>
+  dplyr::mutate(
+    source     = factor(source, levels = c(.ai_levels, "Human (short-3)")),
+    pair_f     = factor(pair, levels = c("Autonomy–Competence",
+                                         "Autonomy–Relatedness",
+                                         "Competence–Relatedness")),
+    instrument = factor(instrument, levels = c("Questionnaire", "LLM Score"))
+  )
+
+# ── plot ──────────────────────────────────────────────────────────────────────
+COL_INSTR  <- c("Questionnaire" = "#C47722", "LLM Score" = "#1F5A71")
+SHAPE_INSTR <- c("Questionnaire" = 15L,      "LLM Score" = 16L)  # square / circle
+
+ggplot(.forest_data,
+       aes(x = r, y = source, xmin = ci_lo, xmax = ci_hi,
+           colour = instrument, shape = instrument)) +
+  geom_vline(xintercept = 0, colour = "grey70", linewidth = 0.3) +
+  geom_hline(yintercept = 9.5, colour = "grey50", linewidth = 0.35,
+             linetype = "dashed") +
+  geom_errorbarh(aes(group = instrument),
+                 height = 0.25, linewidth = 0.5, alpha = 0.8,
+                 position = position_dodge(width = 0.55)) +
+  geom_point(size = 2.5,
+             position = position_dodge(width = 0.55)) +
+  facet_wrap(~pair_f, ncol = 3L) +
+  scale_colour_manual(values = COL_INSTR,  name = "Instrument") +
+  scale_shape_manual( values = SHAPE_INSTR, name = "Instrument") +
+  scale_x_continuous(breaks = seq(0, 0.8, 0.2)) +
+  labs(x = "Pearson r (95% CI)", y = NULL) +
+  theme_thesis() +
+  theme(
+    panel.grid.major.y = element_blank(),
+    panel.grid.major.x = element_line(linewidth = 0.2, colour = "grey88"),
+    legend.position    = "top",
+    axis.text.y        = element_text(size = 9)
+  )
+```
+
+```{r}
+#| label: compute-meta-r-ai
+#| include: false
+
+meta_r_ai <- h1d_ai_results |>
+  dplyr::distinct(condition, meta_r) |>
+  dplyr::mutate(
+    text_count   = as.integer(sub("^(\\d+) texts?.*", "\\1", condition)),
+    target_words = as.integer(sub(".*(\\d+)w$", "\\1", condition))
+  )
+```
+
+## 4.2 Human H1d Analysis
+
+```{r}
+#| label: compute-h1d-human
+#| include: false
+
+# Inter-need Pearson r for Q composites (5-item relatedness for humans)
+q_vec_hu <- c(
+  cor(d_human_clean$q_aut_mean, d_human_clean$q_com_mean, use = "complete.obs"),
+  cor(d_human_clean$q_aut_mean, d_human_clean$q_rel_mean, use = "complete.obs"),
+  cor(d_human_clean$q_com_mean, d_human_clean$q_rel_mean, use = "complete.obs")
+)
+
+# Inter-need Pearson r for LLM composites
+llm_vec_hu <- c(
+  cor(d_human_clean$llm_aut_mean, d_human_clean$llm_com_mean, use = "complete.obs"),
+  cor(d_human_clean$llm_aut_mean, d_human_clean$llm_rel_mean, use = "complete.obs"),
+  cor(d_human_clean$llm_com_mean, d_human_clean$llm_rel_mean, use = "complete.obs")
+)
+
+meta_r_human <- round(cor(q_vec_hu, llm_vec_hu), 2)
+
+tbl_h1d_human <- data.frame(
+  pair      = c("Aut-Com", "Aut-Rel", "Com-Rel"),
+  r_Q       = round(q_vec_hu,   3),
+  r_LLM     = round(llm_vec_hu, 2),
+  meta_r    = c(meta_r_human, NA_real_, NA_real_)
+)
+
+message("H1d human: meta_r = ", meta_r_human)
+```
+
+```{r}
+#| label: tbl-h1d-human
+#| echo: false
+#| tbl-cap: "H1d: Structural Consistency — Inter-Need Correlations and Meta-r for Human Participants (Short-3 Condition; N = 3 Pairs, Descriptive Only)"
+
+tbl_h1d_human |>
+  flextable() |>
+  flextable::colformat_num(j = "meta_r", na_str = "") |>
+  flextable::set_header_labels(
+    pair   = "Need pair",
+    r_Q    = "r (Q)",
+    r_LLM  = "r (LLM)",
+    meta_r = "Meta-r"
+  ) |>
+  style_apa7() |>
+  add_apa_note(paste0(
+    "r (Q) = Pearson r between Q composite means (human sample). ",
+    "Q-Relatedness uses 5 items (vs 4 for AI). ",
+    "meta_r = Pearson r between the three Q r-values and three LLM r-values ",
+    "(condition-level statistic, shown once). N = 3 pairs; descriptive only. ",
+    "Sample: N = ", N_HU, " human participants."
+  ))
+```
+
+## 4.3 Comparison: Human vs AI Short-3
+
+LLM inter-need correlations for the matched AI short-3 condition (3
+texts × 50w) and the human short-3 result are shown side by side per
+need pair. Dashed grey line = AI Q inter-need r; dotted red line = Human
+Q inter-need r (5-item relatedness composite).
+
+```{r}
+#| label: fig-h1d-compare-forest
+#| echo: false
+#| fig-cap: "H1d Comparison: LLM Inter-Need Correlations — AI Surrogate Short-3 vs Human Short-3. Each point = one group. AI surrogate: filled circle (blue); Human: filled diamond (red). Dashed grey line = AI Q inter-need r; dotted red line = Human Q inter-need r (5-item relatedness). Descriptive only; N = 3 pairs per source."
+#| fig-width: 9
+#| fig-height: 3.5
+#| fig-dpi: 300
+
+fig_h1d_cmp <- dplyr::bind_rows(
+  h1d_ai_results |>
+    dplyr::filter(condition == "3 texts × 50w") |>
+    dplyr::transmute(
+      pair, r_LLM, r_Q,
+      cond_label = "AI (short-3)",
+      source     = "AI"
+    ),
+  tbl_h1d_human |>
+    dplyr::transmute(
+      pair, r_LLM, r_Q,
+      cond_label = "Human (short-3)",
+      source     = "Human"
+    )
+) |>
+  dplyr::mutate(
+    pair_f   = factor(pair,
+                      levels = c("Aut-Com", "Aut-Rel", "Com-Rel"),
+                      labels = c("Autonomy–Competence",
+                                 "Autonomy–Relatedness",
+                                 "Competence–Relatedness")),
+    cond_f   = factor(cond_label,
+                      levels = c("AI (short-3)", "Human (short-3)")),
+    source_f = factor(source, levels = c("AI", "Human"))
+  )
+
+q_refs_cmp <- fig_h1d_cmp |>
+  dplyr::distinct(pair_f, source, r_Q)
+
+col_cmp <- c("AI" = COL_AI_SINGLE, "Human" = COL_HU_SINGLE)
+
+ggplot(fig_h1d_cmp, aes(x = r_LLM, y = cond_f, color = source_f)) +
+  geom_vline(xintercept = 0, color = "grey80", linewidth = 0.4) +
+  geom_vline(data = dplyr::filter(q_refs_cmp, source == "AI"),
+             aes(xintercept = r_Q),
+             linetype = "dashed", color = "grey40", linewidth = 0.6,
+             inherit.aes = FALSE) +
+  geom_vline(data = dplyr::filter(q_refs_cmp, source == "Human"),
+             aes(xintercept = r_Q),
+             linetype = "dotted", color = COL_HU_SINGLE, linewidth = 0.6,
+             inherit.aes = FALSE) +
+  geom_point(aes(size = source_f, shape = source_f)) +
+  facet_wrap(~pair_f, ncol = 3L, scales = "free_x") +
+  scale_color_manual(values = col_cmp, name = NULL) +
+  scale_shape_manual(values = c("AI" = 16L, "Human" = 18L), name = NULL) +
+  scale_size_manual(values  = c("AI" = 3.0, "Human" = 3.5), guide = "none") +
+  labs(x = "Inter-need correlation (r)", y = NULL) +
+  theme_thesis() +
+  theme(
+    panel.grid.major.y = element_line(linewidth = 0.2, color = "grey88"),
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor   = element_blank(),
+    legend.position    = "top"
+  )
+```
+
+## 4.4 Spearman Robustness
+
+Spearman ρ is substituted for Pearson r in all six inter-need
+correlations. The meta-r is still Pearson (ranking 3 ρ values is not
+meaningful), so this tests whether the structural pattern result is
+robust to rank-based vs linear associations. **Note:** With N = 3
+pairs, a single pair's rank-order shift can change meta-r by ±0.5 or
+more; the comparison between Pearson and Spearman meta-r values has
+limited diagnostic power and should be interpreted descriptively.
+
+```{r}
+#| label: compute-h1d-human-spearman
+#| include: false
+
+q_vec_hu_sp <- c(
+  cor(d_human_clean$q_aut_mean, d_human_clean$q_com_mean,
+      use = "complete.obs", method = "spearman"),
+  cor(d_human_clean$q_aut_mean, d_human_clean$q_rel_mean,
+      use = "complete.obs", method = "spearman"),
+  cor(d_human_clean$q_com_mean, d_human_clean$q_rel_mean,
+      use = "complete.obs", method = "spearman")
+)
+
+llm_vec_hu_sp <- c(
+  cor(d_human_clean$llm_aut_mean, d_human_clean$llm_com_mean,
+      use = "complete.obs", method = "spearman"),
+  cor(d_human_clean$llm_aut_mean, d_human_clean$llm_rel_mean,
+      use = "complete.obs", method = "spearman"),
+  cor(d_human_clean$llm_com_mean, d_human_clean$llm_rel_mean,
+      use = "complete.obs", method = "spearman")
+)
+
+meta_r_human_sp <- round(cor(q_vec_hu_sp, llm_vec_hu_sp), 2)
+
+tbl_h1d_human_spearman <- data.frame(
+  pair      = c("Aut-Com", "Aut-Rel", "Com-Rel"),
+  rho_Q     = round(q_vec_hu_sp,   3),
+  rho_LLM   = round(llm_vec_hu_sp, 2),
+  meta_r    = c(meta_r_human_sp, NA_real_, NA_real_)
+)
+
+message("H1d human Spearman: meta_r = ", meta_r_human_sp)
+```
+
+```{r}
+#| label: tbl-h1d-human-spearman
+#| echo: false
+#| tbl-cap: "H1d Spearman Robustness: Inter-Need Rho and Meta-r for Human Participants (Short-3 Condition; N = 3 Pairs, Descriptive Only)"
+
+tbl_h1d_human_spearman |>
+  flextable() |>
+  flextable::colformat_num(j = "meta_r", na_str = "") |>
+  flextable::set_header_labels(
+    pair    = "Need pair",
+    rho_Q   = "rho (Q)",
+    rho_LLM = "rho (LLM)",
+    meta_r  = "Meta-r"
+  ) |>
+  style_apa7() |>
+  add_apa_note(paste0(
+    "Spearman rho for all six inter-need correlations; meta-r = Pearson r of the ",
+    "resulting rho vectors. Compare with Pearson results in tbl-h1d-human. ",
+    "N = ", N_HU, " human participants."
+  ))
+```
+
+---
+
+# 5 Supplementary Cross-Group Comparisons
+
+`d_rq3_merged` (AI short-3 + human, matched condition) is used for
+cross-group descriptive comparisons. The table below provides a quick
+summary of LLM score means by group and need dimension.
+
+```{r}
+#| label: tbl-merged-descriptives
+#| echo: false
+#| tbl-cap: "Supplementary: LLM Score Descriptives by Group and Need Dimension (Matched Short-3 Condition)"
+
+d_rq3_merged |>
+  tidyr::pivot_longer(
+    cols      = c(llm_aut_mean, llm_com_mean, llm_rel_mean),
+    names_to  = "variable",
+    values_to = "score"
+  ) |>
+  dplyr::mutate(
+    Need  = factor(dplyr::case_when(
+      grepl("aut", variable) ~ TABLE_LABEL_AUT,
+      grepl("com", variable) ~ TABLE_LABEL_COM,
+      grepl("rel", variable) ~ TABLE_LABEL_REL
+    ), levels = NEEDS),
+    Group = c(AI = LABEL_AI, HU = LABEL_HU)[as.character(id_type)]
+  ) |>
+  dplyr::group_by(Group, Need) |>
+  dplyr::summarise(
+    N  = sum(!is.na(score)),
+    M  = round(mean(score, na.rm = TRUE), 2),
+    SD = round(sd(score,   na.rm = TRUE), 2),
+    .groups = "drop"
+  ) |>
+  flextable() |>
+  style_apa7() |>
+  add_apa_note(paste0(
+    "LLM composite means (3 repeats averaged). ",
+    "AI: matched short-3 condition (target words = 50, text count = 3). ",
+    "Human: short-3 condition."
+  ))
+```
+
+---
+
+# 6 Session Info
+
+```{r}
+#| label: session-info
+#| include: false
+
+sessionInfo()
+```

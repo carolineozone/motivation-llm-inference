@@ -1,0 +1,1130 @@
+---
+title: "RQ3 Analyses — Distributional Equivalence and Correlation Correspondence"
+subtitle: "Bootstrap CIs · BCa sensitivity · Welch t · Levene · Fisher z · Spearman"
+author: "Caroline Müller"
+date: "2026-05-17"
+format:
+  html:
+    code-fold: true
+    code-summary: "Show code"
+    code-tools: true
+    toc: true
+    self-contained: true
+    fig-cap-location: top
+editor:
+  markdown:
+    wrap: 72
+knitr:
+  opts_chunk:
+    dpi: 300
+---
+
+# 1 Overview
+
+**Prerequisite:** Run `30_RQ3_data.qmd` first to generate
+`d_rq3_merged.rds` in `10_data/80_analyses_exports/`.
+
+This file covers all inferential RQ3 analyses:
+
+- **RQ3a** Distributional equivalence: delta-M (Welch t) and delta-SD
+  (Levene's) with bootstrap percentile CIs
+- **RQ3b** Correlation correspondence: Pearson r per group + Fisher's
+  z-difference test + Spearman robustness
+- **BCa sensitivity** checks for delta-SD and delta-r (bounded/skewed)
+
+**Primary CIs:** Bootstrap percentile, R = 10,000, stratified by
+`id_type`.\
+**Sensitivity CIs:** BCa for delta-SD and delta-r; divergence threshold
+= 0.02.
+
+**Note:** The `id_type = "AI"` group is the short-3 matched condition
+from `d_rq3_merged`. All inferential claims about means and SDs are for
+this matched condition only; multi-condition AI comparisons are in
+`20_RQ2_analyses.qmd`.
+
+---
+
+# 2 Setup
+
+## 2.1 Environment
+
+```{r}
+#| label: setup-environment
+#| include: false
+#| warning: false
+
+graphics.off()
+
+suppressPackageStartupMessages({
+  library(dplyr)
+  library(ggplot2)
+  library(tidyr)
+  library(flextable)
+  library(scales)
+  library(psych)
+  library(officer)
+  library(janitor)
+  library(systemfonts)
+  library(ragg)
+  library(boot)
+  library(car)
+  library(purrr)
+  library(cowplot)
+  library(ggtext)
+})
+
+knitr::opts_chunk$set(dev = "ragg_png")
+if (.Platform$OS.type == "windows") windowsFonts(Calibri = windowsFont("Calibri"))
+
+message("Libraries loaded.")
+```
+
+## 2.2 Shared Constants
+
+```{r}
+#| label: setup-common
+#| include: false
+
+source("00_common.R")
+```
+
+## 2.3 Load Upstream Export
+
+```{r}
+#| label: setup-imports
+#| include: false
+
+EXPORT_DIR <- "../10_data/80_analyses_exports"
+
+rds_paths <- list(
+  merged = file.path(EXPORT_DIR, "d_rq3_merged.rds")
+)
+
+for (nm in names(rds_paths)) {
+  if (!file.exists(rds_paths[[nm]])) {
+    stop("Missing upstream export — run 30_RQ3_data.qmd first: ", rds_paths[[nm]])
+  }
+}
+
+d_rq3_merged <- readRDS(rds_paths$merged)
+
+N_AI <- sum(d_rq3_merged$id_type == "AI")
+N_HU <- sum(d_rq3_merged$id_type == "HU")
+
+message("d_rq3_merged loaded: ", N_AI, " AI + ", N_HU, " human = ",
+        nrow(d_rq3_merged), " total rows.")
+```
+
+## 2.4 Helpers
+
+```{r}
+#| label: setup-helpers
+#| include: false
+
+# Point estimate + percentile CI from a numeric vector of bootstrap replicates
+perc_ci <- function(boots, probs = c(CI_Q_LO, CI_Q_HI)) {
+  quantile(boots, probs = probs, na.rm = TRUE)
+}
+
+message("Helpers defined.")
+```
+
+---
+
+# 3 Assumption Checks
+
+## 3.1 Univariate Normality
+
+Shapiro-Wilk at N ≈ 400 is overpowered; significant results are expected
+for trivially small deviations. We use Q-Q plots as the primary
+diagnostic; skewness and kurtosis are reported for reference.
+
+```{r}
+#| label: fig-assump-qq
+#| echo: false
+#| fig-cap: "Univariate Q-Q Plots by Group and Need Dimension. Substantial departures from the diagonal support non-normality."
+#| fig-width: 9
+#| fig-height: 6
+#| fig-dpi: 300
+
+long_rq3 <- d_rq3_merged |>
+  tidyr::pivot_longer(
+    cols      = c(llm_aut_mean, llm_com_mean, llm_rel_mean,
+                  q_aut_mean,   q_com_mean,   q_rel_mean),
+    names_to  = "variable",
+    values_to = "score"
+  ) |>
+  dplyr::mutate(
+    Instrument = dplyr::if_else(startsWith(variable, "llm_"), "LLM score", "Q score"),
+    Need = factor(dplyr::case_when(
+      grepl("aut", variable) ~ TABLE_LABEL_AUT,
+      grepl("com", variable) ~ TABLE_LABEL_COM,
+      grepl("rel", variable) ~ TABLE_LABEL_REL
+    ), levels = NEEDS),
+    Sample = dplyr::recode(id_type, "AI" = LABEL_AI, "HU" = LABEL_HU)
+  )
+
+long_rq3 |>
+  dplyr::filter(Instrument == "LLM score") |>
+  ggplot(aes(sample = score, colour = Sample)) +
+  stat_qq(size = 0.7, alpha = 0.5) +
+  stat_qq_line(linewidth = 0.5) +
+  scale_colour_manual(values = c(setNames(COL_AI_SINGLE, LABEL_AI),
+                                 setNames(COL_HU_SINGLE, LABEL_HU)),
+                      name = NULL) +
+  facet_grid(Sample ~ Need) +
+  labs(x = "Theoretical quantiles", y = "Sample quantiles") +
+  theme_thesis()
+```
+
+## 3.2 Linearity Check
+
+```{r}
+#| label: fig-assump-scatter-rq3
+#| echo: false
+#| fig-cap: "Linearity Check: LLM score vs questionnaire score by group and need. LOESS (solid) vs OLS (dashed)."
+#| fig-width: 9
+#| fig-height: 6
+#| fig-dpi: 300
+
+d_rq3_merged |>
+  tidyr::pivot_longer(
+    cols = c(llm_aut_mean, llm_com_mean, llm_rel_mean,
+             q_aut_mean,   q_com_mean,   q_rel_mean),
+    names_to  = "var", values_to = "score"
+  ) |>
+  dplyr::mutate(
+    instrument = dplyr::if_else(startsWith(var, "llm_"), "llm", "q"),
+    Need = factor(dplyr::case_when(
+      grepl("aut", var) ~ TABLE_LABEL_AUT,
+      grepl("com", var) ~ TABLE_LABEL_COM,
+      grepl("rel", var) ~ TABLE_LABEL_REL
+    ), levels = NEEDS),
+    Sample = dplyr::recode(id_type, "AI" = LABEL_AI, "HU" = LABEL_HU)
+  ) |>
+  dplyr::select(-var) |>
+  tidyr::pivot_wider(id_cols = c(id, id_type, Need, Sample),
+                     names_from = instrument, values_from = score) |>
+  ggplot(aes(x = llm, y = q, colour = id_type)) +
+  geom_jitter(alpha = 0.25, size = 0.9, width = 0.12, height = 0.12) +
+  geom_smooth(method = "loess", se = FALSE, linewidth = 0.7, formula = y ~ x) +
+  geom_smooth(method = "lm",    se = FALSE, linewidth = 0.5, linetype = "dashed",
+              formula = y ~ x) +
+  scale_colour_manual(values = c("AI" = COL_AI_SINGLE, "HU" = COL_HU_SINGLE),
+                      labels  = c("AI" = LABEL_AI, "HU" = LABEL_HU), name = NULL) +
+  scale_x_continuous(limits = c(1, 5), breaks = 1:5) +
+  scale_y_continuous(limits = c(1, 5), breaks = 1:5) +
+  facet_grid(Need ~ Sample) +
+  labs(x = "LLM score", y = "Questionnaire score") +
+  theme_thesis()
+```
+
+---
+
+# 4 RQ3a — Distributional Equivalence
+
+RQ3a asks: to what extent do distributional properties (mean, SD) differ
+between AI surrogate and human participant data?
+
+## 4.1 Bootstrap delta-M
+
+Stratified bootstrap: resample within AI and human groups separately.
+Set.seed(2026) before each `boot::boot()` call.
+
+```{r}
+#| label: boot-delta-m-rq3
+#| include: false
+#| cache: true
+#| cache.extra: !expr list(file.mtime(rds_paths$merged), BOOTSTRAP_SAMPLES)
+
+boot_fn_delta_m <- function(data, indices) {
+  d <- data[indices, ]
+  ai <- dplyr::filter(d, id_type == "AI")
+  hu <- dplyr::filter(d, id_type == "HU")
+  c(
+    aut = mean(ai$llm_aut_mean, na.rm = TRUE) - mean(hu$llm_aut_mean, na.rm = TRUE),
+    com = mean(ai$llm_com_mean, na.rm = TRUE) - mean(hu$llm_com_mean, na.rm = TRUE),
+    rel = mean(ai$llm_rel_mean, na.rm = TRUE) - mean(hu$llm_rel_mean, na.rm = TRUE)
+  )
+}
+
+set.seed(2026)
+boot_delta_m <- boot::boot(
+  data      = d_rq3_merged,
+  statistic = boot_fn_delta_m,
+  R         = BOOTSTRAP_SAMPLES,
+  strata    = as.integer(factor(d_rq3_merged$id_type))
+)
+colnames(boot_delta_m$t) <- names(boot_delta_m$t0)
+
+saveRDS(boot_delta_m, file.path(EXPORT_DIR, "boot_delta_m.rds"))
+message("boot_delta_m complete and saved.")
+```
+
+## 4.2 BCa Sensitivity Check — delta-M
+
+```{r}
+#| label: check-bca-delta-m
+#| include: false
+#| dependson: boot-delta-m-rq3
+
+bca_delta_m_results <- purrr::map_dfr(
+  list(list(idx = 1L, label = TABLE_LABEL_AUT),
+       list(idx = 2L, label = TABLE_LABEL_COM),
+       list(idx = 3L, label = TABLE_LABEL_REL)),
+  function(x) {
+    perc_ci_val <- boot::boot.ci(boot_delta_m, index = x$idx, type = "perc")$percent[4:5]
+    bca_ci_val  <- tryCatch(
+      boot::boot.ci(boot_delta_m, index = x$idx, type = "bca")$bca[4:5],
+      error = function(e) c(NA_real_, NA_real_)
+    )
+    tibble::tibble(
+      need    = x$label,
+      perc_lo = perc_ci_val[1], perc_hi = perc_ci_val[2],
+      bca_lo  = bca_ci_val[1],  bca_hi  = bca_ci_val[2],
+      max_diff = max(abs(bca_lo - perc_lo), abs(bca_hi - perc_hi), na.rm = TRUE)
+    )
+  }
+)
+
+check_bca_divergence_delta_m <- bca_delta_m_results |> dplyr::filter(max_diff > 0.02)
+
+if (nrow(check_bca_divergence_delta_m) > 0) {
+  cat("BCa/percentile divergence > .02 in", nrow(check_bca_divergence_delta_m),
+      "delta-M cell(s):\n")
+  print(check_bca_divergence_delta_m)
+} else {
+  cat("BCa sensitivity check OK: all delta-M CIs agree within .02.\n")
+}
+```
+
+## 4.3 Bootstrap delta-SD
+
+```{r}
+#| label: boot-delta-sd-rq3
+#| include: false
+#| cache: true
+#| cache.extra: !expr list(file.mtime(rds_paths$merged), BOOTSTRAP_SAMPLES)
+
+boot_fn_delta_sd <- function(data, indices) {
+  d <- data[indices, ]
+  ai <- dplyr::filter(d, id_type == "AI")
+  hu <- dplyr::filter(d, id_type == "HU")
+  c(
+    aut = sd(ai$llm_aut_mean, na.rm = TRUE) - sd(hu$llm_aut_mean, na.rm = TRUE),
+    com = sd(ai$llm_com_mean, na.rm = TRUE) - sd(hu$llm_com_mean, na.rm = TRUE),
+    rel = sd(ai$llm_rel_mean, na.rm = TRUE) - sd(hu$llm_rel_mean, na.rm = TRUE)
+  )
+}
+
+set.seed(2026)
+boot_delta_sd <- boot::boot(
+  data      = d_rq3_merged,
+  statistic = boot_fn_delta_sd,
+  R         = BOOTSTRAP_SAMPLES,
+  strata    = as.integer(factor(d_rq3_merged$id_type))
+)
+colnames(boot_delta_sd$t) <- names(boot_delta_sd$t0)
+
+saveRDS(boot_delta_sd, file.path(EXPORT_DIR, "boot_delta_sd.rds"))
+message("boot_delta_sd complete and saved.")
+```
+
+## 4.4 BCa Sensitivity Check — delta-SD
+
+```{r}
+#| label: check-bca-delta-sd
+#| include: false
+#| dependson: boot-delta-sd-rq3
+
+bca_delta_sd_results <- purrr::map_dfr(
+  list(list(idx = 1L, label = TABLE_LABEL_AUT),
+       list(idx = 2L, label = TABLE_LABEL_COM),
+       list(idx = 3L, label = TABLE_LABEL_REL)),
+  function(x) {
+    perc_ci_val <- boot::boot.ci(boot_delta_sd, index = x$idx, type = "perc")$percent[4:5]
+    bca_ci_val  <- tryCatch(
+      boot::boot.ci(boot_delta_sd, index = x$idx, type = "bca")$bca[4:5],
+      error = function(e) c(NA_real_, NA_real_)
+    )
+    tibble::tibble(
+      need    = x$label,
+      perc_lo = perc_ci_val[1], perc_hi = perc_ci_val[2],
+      bca_lo  = bca_ci_val[1],  bca_hi  = bca_ci_val[2],
+      max_diff = max(abs(bca_lo - perc_lo), abs(bca_hi - perc_hi), na.rm = TRUE)
+    )
+  }
+)
+
+check_bca_divergence_delta_sd <- bca_delta_sd_results |> dplyr::filter(max_diff > 0.02)
+
+if (nrow(check_bca_divergence_delta_sd) > 0) {
+  cat("BCa/percentile divergence > .02 in", nrow(check_bca_divergence_delta_sd),
+      "delta-SD cell(s):\n")
+  print(check_bca_divergence_delta_sd)
+} else {
+  cat("BCa sensitivity check OK: all delta-SD CIs agree within .02.\n")
+}
+```
+
+## 4.5 Welch t-test and Levene's Test
+
+```{r}
+#| label: compute-rq3a-tests
+#| include: false
+
+# Welch t-test (delta-M) and Levene's test (delta-SD, center="mean") per need
+rq3a_tests <- purrr::map_dfr(
+  list(list(llm = "llm_aut_mean", need = TABLE_LABEL_AUT, idx = 1L),
+       list(llm = "llm_com_mean", need = TABLE_LABEL_COM, idx = 2L),
+       list(llm = "llm_rel_mean", need = TABLE_LABEL_REL, idx = 3L)),
+  function(x) {
+    ai_vals <- d_rq3_merged[d_rq3_merged$id_type == "AI", x$llm][[1]]
+    hu_vals <- d_rq3_merged[d_rq3_merged$id_type == "HU", x$llm][[1]]
+
+    # Welch t-test (unequal variances assumed)
+    t_res   <- t.test(ai_vals, hu_vals, var.equal = FALSE)
+
+    # Levene's test on the full grouped data (center = "mean" per pre-registration)
+    lev_res <- car::leveneTest(
+      d_rq3_merged[[x$llm]] ~ factor(d_rq3_merged$id_type),
+      center = "mean"
+    )
+
+    # Bootstrap percentile CIs for delta-M
+    delta_m_perc <- perc_ci(boot_delta_m$t[, x$idx])
+    delta_sd_perc <- perc_ci(boot_delta_sd$t[, x$idx])
+
+    tibble::tibble(
+      Need         = x$need,
+      n_AI         = sum(!is.na(ai_vals)),
+      n_HU         = sum(!is.na(hu_vals)),
+      M_AI         = round(mean(ai_vals, na.rm = TRUE), 2),
+      M_HU         = round(mean(hu_vals, na.rm = TRUE), 2),
+      SD_AI        = round(sd(ai_vals, na.rm = TRUE), 2),
+      SD_HU        = round(sd(hu_vals, na.rm = TRUE), 2),
+      delta_M      = sprintf("%.2f [%.2f, %.2f]",
+                             t_res$estimate[1] - t_res$estimate[2],
+                             delta_m_perc[1], delta_m_perc[2]),
+      t_val        = round(t_res$statistic, 2),
+      df_t         = round(t_res$parameter, 1),
+      p_t          = round(t_res$p.value, 3),
+      delta_SD     = sprintf("%.2f [%.2f, %.2f]",
+                             sd(ai_vals, na.rm = TRUE) - sd(hu_vals, na.rm = TRUE),
+                             delta_sd_perc[1], delta_sd_perc[2]),
+      Levene_F     = round(lev_res$`F value`[1], 2),
+      df_lev       = paste0(lev_res$Df[1], ", ", lev_res$Df[2]),
+      p_lev        = round(lev_res$`Pr(>F)`[1], 3)
+    )
+  }
+)
+
+message("RQ3a tests computed.")
+```
+
+## 4.6 RQ3a Results Table
+
+```{r}
+#| label: tbl-rq3a-results
+#| echo: false
+#| tbl-cap: "RQ3a: Distributional Equivalence — Welch t-test and Levene's Test by Need Dimension"
+
+rq3a_tests |>
+  dplyr::select(Need, n_AI, n_HU, M_AI, M_HU, SD_AI, SD_HU,
+                delta_M, t_val, df_t, p_t,
+                delta_SD, Levene_F, df_lev, p_lev) |>
+  flextable() |>
+  flextable::set_header_labels(
+    n_AI       = "N (AI)",  n_HU      = "N (HU)",
+    M_AI       = "M (AI)",  M_HU      = "M (HU)",
+    SD_AI      = "SD (AI)", SD_HU     = "SD (HU)",
+    delta_M    = "Δ M [95% CI]",
+    t_val      = "t",       df_t      = "df",  p_t     = "p",
+    delta_SD   = "Δ SD [95% CI]",
+    Levene_F   = "F",       df_lev    = "df",  p_lev   = "p"
+  ) |>
+  style_apa7() |>
+  add_apa_note(paste0(
+    "Δ M = M(AI) − M(HU); Δ SD = SD(AI) − SD(HU); descriptive effect magnitudes, not inputs to the inferential tests. ",
+    "Bootstrap percentile CIs, R = ", BOOTSTRAP_SAMPLES, ", stratified by group, seed = 2026. ",
+    "Welch's t-test uses group means, SDs, and Ns via the Welch–Satterthwaite formula (var.equal = FALSE). ",
+    "Levene's test uses mean-absolute deviations from group means (center = mean). ",
+    "BCa sensitivity: see check_bca_divergence_delta_m, check_bca_divergence_delta_sd."
+  ))
+```
+
+## 4.7 RQ3a Bar Plot
+
+```{r}
+#| label: fig-rq3a-bars
+#| echo: false
+#| fig-cap: "RQ3a: LLM Score Means by Group and Need Dimension. Error bars = approximate 95% CI (M ± 1.96 SE, normal theory, illustrative). Inferential tests in tbl-rq3a-results."
+#| fig-width: 7
+#| fig-height: 4
+#| fig-dpi: 300
+
+# Use rq3a_tests for point estimates; error bars = ±1.96 SE (illustrative only)
+rq3a_plot_data <- rq3a_tests |>
+  tidyr::pivot_longer(
+    cols      = c(M_AI, M_HU, SD_AI, SD_HU, n_AI, n_HU),
+    names_to  = c(".value", "id_type"),
+    names_sep = "_"
+  ) |>
+  dplyr::mutate(
+    Need  = factor(Need, levels = NEEDS),
+    ci_lo = M - CI_BOUND_95 * SD / sqrt(n),
+    ci_hi = M + CI_BOUND_95 * SD / sqrt(n)
+  )
+
+ggplot(rq3a_plot_data,
+       aes(x = Need, y = M, fill = id_type, group = id_type)) +
+  geom_col(position = position_dodge(width = 0.7), width = 0.6) +
+  geom_errorbar(aes(ymin = ci_lo, ymax = ci_hi),
+                position = position_dodge(width = 0.7),
+                width = 0.2, colour = COLOR_ERRORBAR) +
+  scale_fill_manual(values = c("AI" = COL_AI_SINGLE, "HU" = COL_HU_SINGLE),
+                    labels  = c("AI" = LABEL_AI, "HU" = LABEL_HU),
+                    name    = NULL) +
+  scale_y_continuous(limits = c(0, 5), breaks = 0:5) +
+  labs(x = LABEL_NEEDS, y = "Mean LLM score") +
+  theme_thesis()
+```
+
+## 4.8 RQ3a Distribution Plot
+
+```{r}
+#| label: fig-rq3a-distributions
+#| echo: false
+#| fig-cap: "RQ3a: LLM Score Distributions by Group and Need Dimension. Overlapping density curves for AI surrogates and human participants."
+#| fig-width: 9
+#| fig-height: 4
+#| fig-dpi: 300
+
+d_rq3_merged |>
+  tidyr::pivot_longer(
+    cols      = c(llm_aut_mean, llm_com_mean, llm_rel_mean),
+    names_to  = "variable",
+    values_to = "score"
+  ) |>
+  dplyr::mutate(
+    Need = factor(dplyr::case_when(
+      grepl("aut", variable) ~ TABLE_LABEL_AUT,
+      grepl("com", variable) ~ TABLE_LABEL_COM,
+      grepl("rel", variable) ~ TABLE_LABEL_REL
+    ), levels = NEEDS)
+  ) |>
+  ggplot(aes(x = score, fill = id_type, colour = id_type)) +
+  geom_density(alpha = 0.30, linewidth = 0.6) +
+  scale_fill_manual(values = c("AI" = COL_AI_SINGLE, "HU" = COL_HU_SINGLE),
+                    labels  = c("AI" = LABEL_AI, "HU" = LABEL_HU), name = NULL) +
+  scale_colour_manual(values = c("AI" = COL_AI_SINGLE, "HU" = COL_HU_SINGLE),
+                      labels  = c("AI" = LABEL_AI, "HU" = LABEL_HU), name = NULL) +
+  scale_x_continuous(limits = c(1, 5), breaks = 1:5) +
+  facet_wrap(~Need, ncol = 3L) +
+  labs(x = "Mean LLM score", y = "Density") +
+  theme_thesis()
+```
+
+## 4.9 RQ3a Delta-M and Delta-SD Forest Plots
+
+```{r}
+#| label: fig-rq3a-delta-forest
+#| echo: false
+#| fig-cap: "RQ3a: Bootstrap Estimates of Δ M (left) and Δ SD (right) by Need Dimension. Points = observed AI − Human difference; horizontal segments = 95% bootstrap percentile CIs; dashed line = 0."
+#| fig-width: 9
+#| fig-height: 3
+#| fig-dpi: 300
+
+delta_m_forest_data <- tibble::tibble(
+  Need     = factor(NEEDS, levels = rev(NEEDS)),
+  estimate = as.numeric(boot_delta_m$t0),
+  ci_lo    = apply(boot_delta_m$t, 2L, quantile, CI_Q_LO, na.rm = TRUE),
+  ci_hi    = apply(boot_delta_m$t, 2L, quantile, CI_Q_HI, na.rm = TRUE)
+)
+
+delta_sd_forest_data <- tibble::tibble(
+  Need     = factor(NEEDS, levels = rev(NEEDS)),
+  estimate = as.numeric(boot_delta_sd$t0),
+  ci_lo    = apply(boot_delta_sd$t, 2L, quantile, CI_Q_LO, na.rm = TRUE),
+  ci_hi    = apply(boot_delta_sd$t, 2L, quantile, CI_Q_HI, na.rm = TRUE)
+)
+
+forest_theme_rq3 <- theme_thesis() +
+  theme(
+    panel.grid.major.y = element_blank(),
+    panel.grid.minor   = element_blank(),
+    panel.grid.major.x = element_line(linewidth = 0.2)
+  )
+
+p_dm <- ggplot(delta_m_forest_data, aes(x = estimate, y = Need)) +
+  geom_vline(xintercept = 0, linetype = "dashed", colour = "grey50", linewidth = 0.4) +
+  geom_segment(aes(x = ci_lo, xend = ci_hi, y = Need, yend = Need), linewidth = 0.8) +
+  geom_point(size = 3, shape = 21, fill = "white", stroke = 1.8) +
+  labs(x = "Δ M (AI − Human) [95% CI]", y = NULL) +
+  forest_theme_rq3
+
+p_dsd <- ggplot(delta_sd_forest_data, aes(x = estimate, y = Need)) +
+  geom_vline(xintercept = 0, linetype = "dashed", colour = "grey50", linewidth = 0.4) +
+  geom_segment(aes(x = ci_lo, xend = ci_hi, y = Need, yend = Need), linewidth = 0.8) +
+  geom_point(size = 3, shape = 21, fill = "white", stroke = 1.8) +
+  labs(x = "Δ SD (AI − Human) [95% CI]", y = NULL) +
+  forest_theme_rq3
+
+cowplot::plot_grid(p_dm, p_dsd, ncol = 2L, align = "hv")
+```
+
+---
+
+# 5 RQ3b — Correlation Correspondence
+
+RQ3b asks: to what extent do LLM–questionnaire correlations differ
+between AI surrogates and human participants?
+
+## 5.1 Bootstrap delta-r
+
+```{r}
+#| label: boot-delta-r-rq3
+#| include: false
+#| cache: true
+#| cache.extra: !expr list(file.mtime(rds_paths$merged), BOOTSTRAP_SAMPLES)
+
+boot_fn_delta_r <- function(data, indices) {
+  d  <- data[indices, ]
+  ai <- dplyr::filter(d, id_type == "AI")
+  hu <- dplyr::filter(d, id_type == "HU")
+  r_ai_aut <- cor(ai$llm_aut_mean, ai$q_aut_mean, use = "complete.obs")
+  r_hu_aut <- cor(hu$llm_aut_mean, hu$q_aut_mean, use = "complete.obs")
+  r_ai_com <- cor(ai$llm_com_mean, ai$q_com_mean, use = "complete.obs")
+  r_hu_com <- cor(hu$llm_com_mean, hu$q_com_mean, use = "complete.obs")
+  r_ai_rel <- cor(ai$llm_rel_mean, ai$q_rel_mean, use = "complete.obs")
+  r_hu_rel <- cor(hu$llm_rel_mean, hu$q_rel_mean, use = "complete.obs")
+  c(
+    aut = r_ai_aut - r_hu_aut,
+    com = r_ai_com - r_hu_com,
+    rel = r_ai_rel - r_hu_rel
+  )
+}
+
+set.seed(2026)
+boot_delta_r <- boot::boot(
+  data      = d_rq3_merged,
+  statistic = boot_fn_delta_r,
+  R         = BOOTSTRAP_SAMPLES,
+  strata    = as.integer(factor(d_rq3_merged$id_type))
+)
+colnames(boot_delta_r$t) <- names(boot_delta_r$t0)
+
+saveRDS(boot_delta_r, file.path(EXPORT_DIR, "boot_delta_r.rds"))
+message("boot_delta_r complete and saved.")
+```
+
+## 5.2 BCa Sensitivity Check — delta-r
+
+```{r}
+#| label: check-bca-delta-r
+#| include: false
+#| dependson: boot-delta-r-rq3
+
+bca_delta_r_results <- purrr::map_dfr(
+  list(list(idx = 1L, label = TABLE_LABEL_AUT),
+       list(idx = 2L, label = TABLE_LABEL_COM),
+       list(idx = 3L, label = TABLE_LABEL_REL)),
+  function(x) {
+    perc_ci_val <- boot::boot.ci(boot_delta_r, index = x$idx, type = "perc")$percent[4:5]
+    bca_ci_val  <- tryCatch(
+      boot::boot.ci(boot_delta_r, index = x$idx, type = "bca")$bca[4:5],
+      error = function(e) c(NA_real_, NA_real_)
+    )
+    tibble::tibble(
+      need    = x$label,
+      perc_lo = perc_ci_val[1], perc_hi = perc_ci_val[2],
+      bca_lo  = bca_ci_val[1],  bca_hi  = bca_ci_val[2],
+      max_diff = max(abs(bca_lo - perc_lo), abs(bca_hi - perc_hi), na.rm = TRUE)
+    )
+  }
+)
+
+check_bca_divergence_delta_r <- bca_delta_r_results |> dplyr::filter(max_diff > 0.02)
+
+if (nrow(check_bca_divergence_delta_r) > 0) {
+  cat("BCa/percentile divergence > .02 in", nrow(check_bca_divergence_delta_r),
+      "delta-r cell(s):\n")
+  print(check_bca_divergence_delta_r)
+} else {
+  cat("BCa sensitivity check OK: all delta-r CIs agree within .02.\n")
+}
+```
+
+## 5.3 Fisher z-difference Test and Results
+
+```{r}
+#| label: compute-rq3b-tests
+#| include: false
+
+rq3b_tests <- purrr::map_dfr(
+  list(list(llm = "llm_aut_mean", q = "q_aut_mean", need = TABLE_LABEL_AUT, idx = 1L),
+       list(llm = "llm_com_mean", q = "q_com_mean", need = TABLE_LABEL_COM, idx = 2L),
+       list(llm = "llm_rel_mean", q = "q_rel_mean", need = TABLE_LABEL_REL, idx = 3L)),
+  function(x) {
+    ai_dat <- d_rq3_merged[d_rq3_merged$id_type == "AI", ]
+    hu_dat <- d_rq3_merged[d_rq3_merged$id_type == "HU", ]
+
+    r_ai <- cor(ai_dat[[x$llm]], ai_dat[[x$q]], use = "complete.obs")
+    r_hu <- cor(hu_dat[[x$llm]], hu_dat[[x$q]], use = "complete.obs")
+    n_ai <- sum(complete.cases(ai_dat[[x$llm]], ai_dat[[x$q]]))
+    n_hu <- sum(complete.cases(hu_dat[[x$llm]], hu_dat[[x$q]]))
+
+    # Fisher z-difference test: psych::r.test()
+    rtest <- psych::r.test(n = n_ai, n2 = n_hu, r12 = r_ai, r34 = r_hu)
+
+    delta_r_perc <- perc_ci(boot_delta_r$t[, x$idx])
+
+    tibble::tibble(
+      Need        = x$need,
+      r_AI        = round(r_ai, 2),
+      r_HU        = round(r_hu, 2),
+      n_AI        = n_ai,
+      n_HU        = n_hu,
+      delta_r     = round(r_ai - r_hu, 2),
+      delta_r_ci  = sprintf("[%.2f, %.2f]", delta_r_perc[1], delta_r_perc[2]),
+      Fisher_z    = round(rtest$z, 2),
+      p_Fisher    = round(rtest$p, 3)
+    )
+  }
+)
+
+message("RQ3b tests computed.")
+```
+
+## 5.4 RQ3b Results Table
+
+```{r}
+#| label: tbl-rq3b-results
+#| echo: false
+#| tbl-cap: "RQ3b: Correlation Correspondence — Pearson r per Group and Fisher z-Difference by Need Dimension"
+
+rq3b_tests |>
+  flextable() |>
+  flextable::set_header_labels(
+    r_AI       = "r (AI)", r_HU       = "r (HU)",
+    n_AI       = "N (AI)", n_HU       = "N (HU)",
+    delta_r    = "Δ r",    delta_r_ci  = "95% CI (Δ r)",
+    Fisher_z   = "z",      p_Fisher    = "p"
+  ) |>
+  style_apa7() |>
+  add_apa_note(paste0(
+    "r = Pearson LLM–questionnaire correlation. ",
+    "Δ r = r(AI) − r(HU); bootstrap percentile CIs, R = ", BOOTSTRAP_SAMPLES,
+    ", stratified by group, seed = 2026. ",
+    "Fisher z-difference test via psych::r.test(), two independent groups. ",
+    "BCa sensitivity: see check_bca_divergence_delta_r."
+  ))
+```
+
+## 5.5 RQ3b Scatter Plot
+
+```{r}
+#| label: fig-rq3b-scatter
+#| echo: false
+#| fig-cap: "RQ3b: LLM score vs questionnaire score by group and need dimension. LOESS (solid), OLS (dashed). Pearson r annotated per panel."
+#| fig-width: 9
+#| fig-height: 6
+#| fig-dpi: 300
+
+# Annotate each panel with r value
+r_labels <- dplyr::bind_rows(
+  rq3b_tests |>
+    dplyr::transmute(
+      id_type = "AI", Need = factor(Need, levels = NEEDS),
+      label = sprintf("r = %.2f", r_AI),
+      x = 1.3, y = 4.7
+    ),
+  rq3b_tests |>
+    dplyr::transmute(
+      id_type = "HU", Need = factor(Need, levels = NEEDS),
+      label = sprintf("r = %.2f", r_HU),
+      x = 1.3, y = 4.7
+    )
+)
+
+d_rq3_merged |>
+  tidyr::pivot_longer(
+    cols = c(llm_aut_mean, llm_com_mean, llm_rel_mean,
+             q_aut_mean,   q_com_mean,   q_rel_mean),
+    names_to  = "var", values_to = "score"
+  ) |>
+  dplyr::mutate(
+    instrument = dplyr::if_else(startsWith(var, "llm_"), "llm", "q"),
+    Need = factor(dplyr::case_when(
+      grepl("aut", var) ~ TABLE_LABEL_AUT,
+      grepl("com", var) ~ TABLE_LABEL_COM,
+      grepl("rel", var) ~ TABLE_LABEL_REL
+    ), levels = NEEDS)
+  ) |>
+  dplyr::select(-var) |>
+  tidyr::pivot_wider(id_cols = c(id, id_type, Need),
+                     names_from = instrument, values_from = score) |>
+  ggplot(aes(x = llm, y = q, colour = id_type)) +
+  geom_jitter(alpha = 0.25, size = 0.9, width = 0.12, height = 0.12) +
+  geom_smooth(method = "loess", se = FALSE, linewidth = 0.7, formula = y ~ x) +
+  geom_smooth(method = "lm",    se = FALSE, linewidth = 0.5, linetype = "dashed",
+              formula = y ~ x) +
+  geom_text(data = r_labels, aes(x = x, y = y, label = label, colour = id_type),
+            size = 3, hjust = 0, family = THESIS_FONT, inherit.aes = FALSE) +
+  scale_colour_manual(values = c("AI" = COL_AI_SINGLE, "HU" = COL_HU_SINGLE),
+                      labels  = c("AI" = LABEL_AI, "HU" = LABEL_HU), name = NULL) +
+  scale_x_continuous(limits = c(1, 5), breaks = 1:5) +
+  scale_y_continuous(limits = c(1, 5), breaks = 1:5) +
+  facet_grid(Need ~ id_type,
+             labeller = labeller(id_type = c("AI" = LABEL_AI, "HU" = LABEL_HU))) +
+  labs(x = "LLM score", y = "Questionnaire score") +
+  theme_thesis() +
+  theme(legend.position = "none")
+```
+
+## 5.5.1 Bootstrap Per-Group r CIs
+
+```{r}
+#| label: boot-rq3b-group-cis
+#| include: false
+
+boot_fn_r_single <- function(data, i) cor(data$llm[i], data$q[i], method = "pearson")
+
+rq3b_group_ci_data <- purrr::map_dfr(
+  list(list(llm = "llm_aut_mean", q = "q_aut_mean", need = TABLE_LABEL_AUT),
+       list(llm = "llm_com_mean", q = "q_com_mean", need = TABLE_LABEL_COM),
+       list(llm = "llm_rel_mean", q = "q_rel_mean", need = TABLE_LABEL_REL)),
+  function(x) {
+    ai_dat <- d_rq3_merged[d_rq3_merged$id_type == "AI", ]
+    hu_dat <- d_rq3_merged[d_rq3_merged$id_type == "HU", ]
+
+    r_ai <- cor(ai_dat[[x$llm]], ai_dat[[x$q]], use = "complete.obs")
+    r_hu <- cor(hu_dat[[x$llm]], hu_dat[[x$q]], use = "complete.obs")
+
+    set.seed(2026)
+    boot_ai <- boot::boot(
+      data.frame(llm = ai_dat[[x$llm]], q = ai_dat[[x$q]]),
+      boot_fn_r_single, R = BOOTSTRAP_SAMPLES)
+    ci_ai <- boot::boot.ci(boot_ai, type = "perc")$percent[4:5]
+
+    set.seed(2026)
+    boot_hu <- boot::boot(
+      data.frame(llm = hu_dat[[x$llm]], q = hu_dat[[x$q]]),
+      boot_fn_r_single, R = BOOTSTRAP_SAMPLES)
+    ci_hu <- boot::boot.ci(boot_hu, type = "perc")$percent[4:5]
+
+    dplyr::bind_rows(
+      tibble::tibble(need = x$need, group = LABEL_AI, r = r_ai,
+                     ci_lo = ci_ai[1], ci_hi = ci_ai[2]),
+      tibble::tibble(need = x$need, group = LABEL_HU, r = r_hu,
+                     ci_lo = ci_hu[1], ci_hi = ci_hu[2])
+    )
+  }
+) |>
+  dplyr::mutate(
+    need  = factor(need,  levels = c(TABLE_LABEL_AUT, TABLE_LABEL_COM, TABLE_LABEL_REL)),
+    group = factor(group, levels = c(LABEL_HU, LABEL_AI))
+  )
+
+message("Per-group r bootstrap CIs computed.")
+```
+
+## 5.5.2 Figure: Correlations per Group — Dot Plot with CI
+
+```{r}
+#| label: fig-rq3b-corr-CI
+#| echo: false
+#| fig-cap: "Pearson r between LLM scores and questionnaire scores by need dimension and group (RQ3b). Error bars = 95% bootstrap CIs. Bracket = Δr (r_AI − r_Human)."
+#| fig-width: 6
+#| fig-height: 4
+#| fig-dpi: 300
+
+DODGE_W <- 0.1
+TICK_W  <- 0.10
+
+fig_rq3b_corr_ci_data <- rq3b_group_ci_data |>
+  dplyr::mutate(x = as.numeric(need) + ifelse(group == LABEL_HU, -DODGE_W, DODGE_W))
+
+bracket_data <- rq3b_group_ci_data |>
+  dplyr::select(need, group, r) |>
+  tidyr::pivot_wider(names_from = group, values_from = r) |>
+  dplyr::rename(Need = need, r_AI = !!LABEL_AI, r_HU = !!LABEL_HU) |>
+  dplyr::mutate(
+    need_num = dplyr::case_when(
+      Need == TABLE_LABEL_AUT ~ 1L,
+      Need == TABLE_LABEL_COM ~ 2L,
+      Need == TABLE_LABEL_REL ~ 3L
+    ),
+    x_arm = need_num
+  )
+
+rq3b_group_colors_ci <- c(
+  setNames(COL_AI_SHADES2[4], LABEL_AI),
+  setNames(COL_HU_SHADES[1], LABEL_HU)
+  #COL_AI_SHADES2
+)
+
+ggplot(fig_rq3b_corr_ci_data,
+    aes(x = x, y = r, color = group, fill = group, group = group)) +
+  geom_hline(yintercept = 0, linetype = "dashed", linewidth = 0.5, color = "grey60") +
+  geom_errorbar(aes(ymin = ci_lo, ymax = ci_hi), width = 0, linewidth = 0.8) +
+  geom_point(shape = 21, fill = "white", size = 1.5, stroke = 1.8) +
+  geom_segment(data = bracket_data,
+    aes(x = x_arm, xend = x_arm, y = r_HU, yend = r_AI),
+    color = COL_DIFF, linewidth = 0.25, inherit.aes = FALSE) +
+  geom_segment(data = bracket_data,
+    aes(x = x_arm - TICK_W, xend = x_arm + TICK_W, y = r_AI, yend = r_AI),
+    color = COL_DIFF, linewidth = 0.25, inherit.aes = FALSE) +
+  geom_segment(data = bracket_data,
+    aes(x = x_arm - TICK_W, xend = x_arm + TICK_W, y = r_HU, yend = r_HU),
+    color = COL_DIFF, linewidth = 0.25, inherit.aes = FALSE) +
+  scale_x_continuous(
+    breaks   = 1:3,
+    labels   = levels(fig_rq3b_corr_ci_data$need),
+    limits   = c(0.6, 3.6),
+    position = "top"
+  ) +
+  scale_color_manual(values = rq3b_group_colors_ci, name = NULL) +
+  scale_fill_manual(values  = rq3b_group_colors_ci, name = NULL) +
+  labs(x = NULL, y = "Pearson *r*") +
+  theme_thesis() +
+  theme(
+    panel.grid.major.x   = element_blank(),
+    panel.grid.minor.x   = element_blank(),
+    axis.text.x.top      = element_text(colour = "black"),
+    panel.grid.major.y   = element_line(linewidth = 0.3),
+    panel.grid.minor.y   = element_line(linewidth = 0.3),
+    axis.title.y         = ggtext::element_markdown(family = THESIS_FONT, margin = margin(r = 12)),
+    legend.position      = c(0.18, 0.15),
+    legend.direction     = "horizontal",
+    legend.margin        = margin(t = 4),
+    legend.background    = element_rect(fill = "white", color = NA),
+    legend.key           = element_blank()
+  )
+```
+
+*Note.* Error bars = 95% bootstrap CIs (R = `r BOOTSTRAP_SAMPLES`). AI surrogates N = `r N_AI`; Humans N = `r N_HU`.
+
+```{r}
+#| label: fig-rq3b-corr-CI-rect
+#| echo: false
+#| fig-cap: "Pearson r between LLM scores and questionnaire scores by need dimension and group (RQ3b). Error bars = 95% bootstrap CIs. Shaded rectangles = difference between point estimates (Δr)."
+#| fig-width: 6
+#| fig-height: 4
+#| fig-dpi: 300
+
+RECT_HALF_W <- 0.04
+LABEL_DIFF  <- "Δr"
+
+bracket_data_rect <- bracket_data |>
+  dplyr::mutate(diff_label = LABEL_DIFF)
+
+all_levels       <- c(LABEL_HU, LABEL_AI, LABEL_DIFF)
+all_color_values <- c(rq3b_group_colors_ci, setNames("transparent", LABEL_DIFF))
+all_fill_values  <- c(rq3b_group_colors_ci, setNames(COL_DIFF,      LABEL_DIFF))
+
+ggplot(fig_rq3b_corr_ci_data,
+    aes(x = x, y = r, color = group, fill = group, group = group)) +
+  geom_hline(yintercept = 0, linetype = "dashed", linewidth = 0.5, color = "grey60") +
+  geom_rect(data = bracket_data_rect,
+    aes(xmin = x_arm - RECT_HALF_W, xmax = x_arm + RECT_HALF_W,
+        ymin = pmin(r_HU, r_AI),     ymax = pmax(r_HU, r_AI),
+        fill = diff_label, color = diff_label),
+    alpha = 0.45,
+    inherit.aes = FALSE) +
+  geom_errorbar(aes(ymin = ci_lo, ymax = ci_hi), width = 0, linewidth = 0.8) +
+  geom_point(shape = 21, fill = "white", size = 1.5, stroke = 1.8) +
+  scale_x_continuous(
+    breaks   = 1:3,
+    labels   = levels(fig_rq3b_corr_ci_data$need),
+    limits   = c(0.6, 3.6),
+    position = "top"
+  ) +
+  scale_color_manual(
+    values = all_color_values, name = NULL, limits = all_levels,
+    labels = c(LABEL_HU, LABEL_AI, "Δ<i>r</i>"),
+    guide  = guide_legend(nrow = 2, byrow = TRUE, override.aes = list(
+      shape     = c(21L,  21L,  22L),
+      linetype  = c("solid", "solid", "blank"),
+      linewidth = c(0.8,  0.8,  0),
+      size      = c(1.5,  1.5,  3.5),
+      fill      = c("white", "white", COL_DIFF),
+      color     = c(rq3b_group_colors_ci[[LABEL_HU]],
+                    rq3b_group_colors_ci[[LABEL_AI]],
+                    "transparent"),
+      alpha     = c(1, 1, 0.45)
+    ))
+  ) +
+  scale_fill_manual(values = all_fill_values, name = NULL, limits = all_levels,
+    guide = "none") +
+  labs(x = NULL, y = "Pearson *r*") +
+  theme_thesis() +
+  theme(
+    panel.grid.major.x   = element_blank(),
+    panel.grid.minor.x   = element_blank(),
+    axis.text.x.top      = element_text(colour = "black"),
+    panel.grid.major.y   = element_line(linewidth = 0.3),
+    panel.grid.minor.y   = element_line(linewidth = 0.3),
+    axis.title.y         = ggtext::element_markdown(family = THESIS_FONT, margin = margin(r = 12)),
+    legend.position      = c(0.23, 0.13),
+    legend.direction     = "horizontal",
+    legend.margin        = margin(t = 4),
+    legend.background    = element_rect(fill = "white", color = NA),
+    legend.key           = element_blank(),
+    legend.text          = ggtext::element_markdown(family = THESIS_FONT)
+  )
+```
+
+*Note.* Error bars = 95% bootstrap CIs (R = `r BOOTSTRAP_SAMPLES`). Shaded rectangles = Δr = r(AI) − r(Human). AI surrogates N = `r N_AI`; Humans N = `r N_HU`.
+
+## 5.6 Spearman Robustness
+
+```{r}
+#| label: compute-rq3b-spearman
+#| include: false
+#| cache: true
+#| cache.extra: !expr list(file.mtime(rds_paths$merged), POLY_BOOT_R_RQ2)
+
+boot_fn_delta_rho <- function(data, indices) {
+  d  <- data[indices, ]
+  ai <- dplyr::filter(d, id_type == "AI")
+  hu <- dplyr::filter(d, id_type == "HU")
+  c(
+    aut = cor(ai$llm_aut_mean, ai$q_aut_mean, use = "complete.obs", method = "spearman") -
+          cor(hu$llm_aut_mean, hu$q_aut_mean, use = "complete.obs", method = "spearman"),
+    com = cor(ai$llm_com_mean, ai$q_com_mean, use = "complete.obs", method = "spearman") -
+          cor(hu$llm_com_mean, hu$q_com_mean, use = "complete.obs", method = "spearman"),
+    rel = cor(ai$llm_rel_mean, ai$q_rel_mean, use = "complete.obs", method = "spearman") -
+          cor(hu$llm_rel_mean, hu$q_rel_mean, use = "complete.obs", method = "spearman")
+  )
+}
+
+set.seed(2026)
+boot_spearman_rq3 <- boot::boot(
+  data      = d_rq3_merged,
+  statistic = boot_fn_delta_rho,
+  R         = POLY_BOOT_R_RQ2,
+  strata    = as.integer(factor(d_rq3_merged$id_type))
+)
+colnames(boot_spearman_rq3$t) <- names(boot_spearman_rq3$t0)
+
+message("boot_spearman_rq3 complete.")
+```
+
+```{r}
+#| label: tbl-rq3b-spearman
+#| echo: false
+#| tbl-cap: "RQ3b Spearman Robustness: Rho per Group and Delta-rho with Percentile CIs"
+
+purrr::map_dfr(
+  list(list(llm = "llm_aut_mean", q = "q_aut_mean", need = TABLE_LABEL_AUT, idx = 1L),
+       list(llm = "llm_com_mean", q = "q_com_mean", need = TABLE_LABEL_COM, idx = 2L),
+       list(llm = "llm_rel_mean", q = "q_rel_mean", need = TABLE_LABEL_REL, idx = 3L)),
+  function(x) {
+    ai_dat <- d_rq3_merged[d_rq3_merged$id_type == "AI", ]
+    hu_dat <- d_rq3_merged[d_rq3_merged$id_type == "HU", ]
+    rho_ai <- cor(ai_dat[[x$llm]], ai_dat[[x$q]], use = "complete.obs", method = "spearman")
+    rho_hu <- cor(hu_dat[[x$llm]], hu_dat[[x$q]], use = "complete.obs", method = "spearman")
+    d_rho_ci <- perc_ci(boot_spearman_rq3$t[, x$idx])
+    tibble::tibble(
+      Need        = x$need,
+      rho_AI      = round(rho_ai, 2),
+      rho_HU      = round(rho_hu, 2),
+      delta_rho   = round(rho_ai - rho_hu, 2),
+      delta_rho_ci = sprintf("[%.2f, %.2f]", d_rho_ci[1], d_rho_ci[2])
+    )
+  }
+) |>
+  flextable() |>
+  flextable::set_header_labels(
+    rho_AI = "ρ (AI)", rho_HU = "ρ (HU)",
+    delta_rho = "Δ ρ", delta_rho_ci = "95% CI (Δ ρ)"
+  ) |>
+  style_apa7() |>
+  add_apa_note(paste0(
+    "Spearman rho on unrounded continuous scores. ",
+    "Δ ρ bootstrap percentile CIs, R = ", POLY_BOOT_R_RQ2, ", stratified by group. ",
+    "Compare with Pearson r in tbl-rq3b-results."
+  ))
+```
+
+## 5.7 RQ3b Delta-r Forest Plot
+
+```{r}
+#| label: fig-rq3b-delta-r-forest
+#| echo: false
+#| fig-cap: "RQ3b: Bootstrap Estimates of Δ r (AI − Human) by Need Dimension. Points = observed Pearson r difference; horizontal segments = 95% bootstrap percentile CIs; dashed line = 0."
+#| fig-width: 6
+#| fig-height: 3
+#| fig-dpi: 300
+
+delta_r_forest_data <- tibble::tibble(
+  Need     = factor(NEEDS, levels = rev(NEEDS)),
+  estimate = as.numeric(boot_delta_r$t0),
+  ci_lo    = apply(boot_delta_r$t, 2L, quantile, CI_Q_LO, na.rm = TRUE),
+  ci_hi    = apply(boot_delta_r$t, 2L, quantile, CI_Q_HI, na.rm = TRUE)
+)
+
+ggplot(delta_r_forest_data, aes(x = estimate, y = Need)) +
+  geom_vline(xintercept = 0, linetype = "dashed", colour = "grey50", linewidth = 0.4) +
+  geom_segment(aes(x = ci_lo, xend = ci_hi, y = Need, yend = Need), linewidth = 0.8) +
+  geom_point(size = 3, shape = 21, fill = "white", stroke = 1.8) +
+  labs(x = "Δ r (AI − Human) [95% bootstrap CI]", y = NULL) +
+  theme_thesis() +
+  theme(
+    panel.grid.major.y = element_blank(),
+    panel.grid.minor   = element_blank(),
+    panel.grid.major.x = element_line(linewidth = 0.2)
+  )
+```
+
+---
+
+# 6 Appendix: BCa Sensitivity Tables
+
+```{r}
+#| label: tbl-bca-delta-m-appendix
+#| echo: false
+#| tbl-cap: "Appendix: BCa vs Percentile CIs for Delta-M — All 3 Need Dimensions"
+
+bca_delta_m_results |>
+  dplyr::mutate(dplyr::across(where(is.numeric), \(x) round(x, 3))) |>
+  flextable() |>
+  style_apa7() |>
+  add_apa_note("Divergence threshold = 0.02. Cells with max_diff > 0.02 also reported in check_bca_divergence_delta_m.")
+```
+
+```{r}
+#| label: tbl-bca-delta-sd-appendix
+#| echo: false
+#| tbl-cap: "Appendix: BCa vs Percentile CIs for Delta-SD — All 3 Need Dimensions"
+
+bca_delta_sd_results |>
+  dplyr::mutate(dplyr::across(where(is.numeric), \(x) round(x, 3))) |>
+  flextable() |>
+  style_apa7() |>
+  add_apa_note("Divergence threshold = 0.02. Cells with max_diff > 0.02 also reported in check_bca_divergence_delta_sd.")
+```
+
+```{r}
+#| label: tbl-bca-delta-r-appendix
+#| echo: false
+#| tbl-cap: "Appendix: BCa vs Percentile CIs for Delta-r — All 3 Need Dimensions"
+
+bca_delta_r_results |>
+  dplyr::mutate(dplyr::across(where(is.numeric), \(x) round(x, 3))) |>
+  flextable() |>
+  style_apa7() |>
+  add_apa_note("Divergence threshold = 0.02. Cells with max_diff > 0.02 also reported in check_bca_divergence_delta_r.")
+```
+
+---
+
+# 7 Session Info
+
+```{r}
+#| label: session-info
+#| include: false
+
+sessionInfo()
+```

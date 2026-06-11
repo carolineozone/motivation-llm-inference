@@ -1,0 +1,774 @@
+---
+title: "RQ3 Data — Human Import, Merge, and Descriptives"
+subtitle: "Human participant data · AI–human merge · Matched condition"
+author: "Caroline Müller"
+date: "2026-05-17"
+format:
+  html:
+    code-fold: true
+    code-summary: "Show code"
+    code-tools: true
+    toc: true
+    self-contained: true
+    fig-cap-location: top
+editor:
+  markdown:
+    wrap: 72
+knitr:
+  opts_chunk:
+    dpi: 300
+---
+
+# 1 Overview
+
+**Prerequisite:** Run `10_RQ2_data.qmd` first to generate
+`d_rq3_ai.rds`, `tbl_icc_raw.rds`, and
+`tbl_word_count_by_condition.rds` in `10_data/80_analyses_exports/`.
+
+This file covers:
+
+- Import and quality-check of human participant CSV
+- Questionnaire composites (autonomy: 4 items; competence: 4 items;
+  relatedness: **5 items** — differs from AI surrogates)
+- Merge with matched AI surrogate condition (short-3: target_words = 50,
+  text_count = 3)
+- Descriptive comparison (demographics, Q scores, LLM scores)
+- Export of `d_rq3_merged.rds` and `d_human_clean.rds`
+
+**Note on relatedness items:** human participants completed 5 relatedness
+items (rel1–rel5); AI surrogate composites use 4 items. The composite
+means (`q_rel_mean`) are therefore not strictly comparable at the item
+level, but are on the same 1–5 scale. This is acknowledged in all
+comparisons.
+
+---
+
+# 2 Setup
+
+## 2.1 Environment
+
+```{r}
+#| label: setup-environment
+#| include: false
+#| warning: false
+
+graphics.off()
+
+suppressPackageStartupMessages({
+  library(dplyr)
+  library(ggplot2)
+  library(tidyr)
+  library(flextable)
+  library(scales)
+  library(psych)
+  library(officer)
+  library(janitor)
+  library(systemfonts)
+  library(ragg)
+  library(stringr)
+})
+
+knitr::opts_chunk$set(dev = "ragg_png")
+if (.Platform$OS.type == "windows") windowsFonts(Calibri = windowsFont("Calibri"))
+
+message("Libraries loaded.")
+```
+
+## 2.2 Shared Constants
+
+```{r}
+#| label: setup-common
+#| include: false
+
+source("00_common.R")
+```
+
+## 2.3 Load Upstream Exports
+
+```{r}
+#| label: setup-imports
+#| include: false
+
+EXPORT_DIR   <- "../10_data/80_analyses_exports"
+RAW_DATA_DIR <- "../10_data/10_raw"
+
+rds_paths <- list(
+  ai_rq3 = file.path(EXPORT_DIR, "d_rq3_ai.rds")
+)
+
+for (nm in names(rds_paths)) {
+  if (!file.exists(rds_paths[[nm]])) {
+    stop("Missing upstream export — run 10_RQ2_data.qmd first: ", rds_paths[[nm]])
+  }
+}
+
+d_rq3_ai <- readRDS(rds_paths$ai_rq3)
+
+message("AI data loaded: ", nrow(d_rq3_ai), " rows, ",
+        n_distinct(d_rq3_ai$id), " AI surrogates.")
+```
+
+---
+
+# 3 Human Data Import
+
+## 3.1 Import Raw CSV
+
+```{r}
+#| label: import-human-raw
+#| include: false
+
+HUMAN_CSV <- file.path(RAW_DATA_DIR, "humans_2026-04-13.csv")
+
+if (!file.exists(HUMAN_CSV))
+  stop("Human data file not found: ", HUMAN_CSV)
+
+raw_human <- read.csv(HUMAN_CSV, sep = "|", na.strings = "NA",
+                      stringsAsFactors = FALSE)
+
+message("Human CSV loaded: ", basename(HUMAN_CSV),
+        " | Modified: ", format(file.mtime(HUMAN_CSV), "%Y-%m-%d %H:%M"),
+        " | Rows: ", nrow(raw_human),
+        " | Columns: ", ncol(raw_human))
+```
+
+## 3.2 Import Audit
+
+```{r}
+#| label: tbl-import-audit-human
+#| echo: false
+#| tbl-cap: "Human Data Import Audit"
+
+tbl_import_audit_human <- tibble::tribble(
+  ~Metric,                ~Value,
+  "Source file",          basename(HUMAN_CSV),
+  "Total rows",           as.character(nrow(raw_human)),
+  "Expected columns",     "participant_id, gender, birthyear, education, aut1-4, comp1-4, rel1-5, PVQ_M/K_1-21, llm_*_rep1-3, wc_*",
+  "Actual columns",       as.character(ncol(raw_human)),
+  "Q aut items",          if (all(paste0("aut", 1:4) %in% names(raw_human))) "aut1-4 present" else "MISSING",
+  "Q com items",          if (all(paste0("comp", 1:4) %in% names(raw_human))) "comp1-4 present" else "MISSING",
+  "Q rel items",          if (all(paste0("rel", 1:5) %in% names(raw_human))) "rel1-5 present (5 items)" else "MISSING",
+  "LLM aut columns",      if (all(paste0("llm_aut_rep", 1:3) %in% names(raw_human))) "llm_aut_rep1-3 present" else "MISSING",
+  "LLM com columns",      if (all(paste0("llm_com_rep", 1:3) %in% names(raw_human))) "llm_com_rep1-3 present" else "MISSING",
+  "LLM rel columns",      if (all(paste0("llm_rel_rep", 1:3) %in% names(raw_human))) "llm_rel_rep1-3 present" else "MISSING",
+  "Word count col",       if ("wc_total" %in% names(raw_human)) "wc_total present" else "MISSING",
+  "Duplicate IDs",        as.character(sum(duplicated(raw_human$participant_id)))
+)
+
+tbl_import_audit_human |>
+  flextable() |>
+  style_apa7() |>
+  add_apa_note("Column presence gates — any MISSING entry would indicate a pipeline change in the source file.")
+```
+
+## 3.3 Data Quality Checks
+
+```{r}
+#| label: check-human-quality
+#| include: false
+
+# ── Range checks ─────────────────────────────────────────────────────────────
+
+q_items_raw  <- raw_human |> dplyr::select(aut1:aut4, comp1:comp4, rel1:rel5)
+llm_items_raw <- raw_human |> dplyr::select(dplyr::starts_with("llm_"))
+
+check_human_q_range <- q_items_raw |>
+  tidyr::pivot_longer(everything(), names_to = "item", values_to = "val") |>
+  dplyr::filter(!is.na(val)) |>
+  dplyr::summarise(
+    min_val = min(val), max_val = max(val),
+    n_below_1 = sum(val < 1), n_above_5 = sum(val > 5)
+  )
+
+check_human_llm_range <- llm_items_raw |>
+  tidyr::pivot_longer(everything(), names_to = "item", values_to = "val") |>
+  dplyr::filter(!is.na(val)) |>
+  dplyr::summarise(
+    min_val = min(val), max_val = max(val),
+    n_below_1 = sum(val < 1), n_above_5 = sum(val > 5)
+  )
+
+if (check_human_q_range$n_below_1 > 0 | check_human_q_range$n_above_5 > 0)
+  warning("Q items out of [1, 5] range: below=", check_human_q_range$n_below_1,
+          " above=", check_human_q_range$n_above_5)
+
+if (check_human_llm_range$n_below_1 > 0 | check_human_llm_range$n_above_5 > 0)
+  warning("LLM items out of [1, 5] range: below=", check_human_llm_range$n_below_1,
+          " above=", check_human_llm_range$n_above_5)
+
+cat("Q item range: [", check_human_q_range$min_val, ",",
+    check_human_q_range$max_val, "] —",
+    ifelse(check_human_q_range$n_below_1 + check_human_q_range$n_above_5 == 0,
+           "all in [1, 5].", "OUT-OF-RANGE VALUES DETECTED."), "\n")
+
+cat("LLM item range: [", check_human_llm_range$min_val, ",",
+    check_human_llm_range$max_val, "] —",
+    ifelse(check_human_llm_range$n_below_1 + check_human_llm_range$n_above_5 == 0,
+           "all in [1, 5].", "OUT-OF-RANGE VALUES DETECTED."), "\n")
+
+# ── Birthyear plausibility ────────────────────────────────────────────────────
+
+current_year <- 2026L
+check_human_birthyear <- raw_human |>
+  dplyr::mutate(
+    age_computed = current_year - as.integer(birthyear),
+    implausible  = age_computed < 18 | age_computed > 80
+  ) |>
+  dplyr::summarise(
+    n_total      = dplyr::n(),
+    n_implausible = sum(implausible, na.rm = TRUE),
+    min_age      = min(age_computed, na.rm = TRUE),
+    max_age      = max(age_computed, na.rm = TRUE),
+    mean_age     = round(mean(age_computed, na.rm = TRUE), 1)
+  )
+
+cat("Birthyear → age range: [", check_human_birthyear$min_age, ",",
+    check_human_birthyear$max_age, "], M =", check_human_birthyear$mean_age, "\n")
+
+if (check_human_birthyear$n_implausible > 0)
+  warning("Implausible ages (< 18 or > 80): n = ",
+          check_human_birthyear$n_implausible)
+
+# ── Missing data ─────────────────────────────────────────────────────────────
+
+check_human_missing <- colSums(is.na(raw_human)) |>
+  tibble::enframe(name = "column", value = "n_missing") |>
+  dplyr::filter(n_missing > 0) |>
+  dplyr::arrange(dplyr::desc(n_missing))
+
+if (nrow(check_human_missing) > 0) {
+  cat("Columns with missing data:\n")
+  print(check_human_missing)
+} else {
+  cat("Missing data check OK: no NAs in any column.\n")
+}
+
+# ── Duplicate IDs ─────────────────────────────────────────────────────────────
+
+check_human_dup_ids <- sum(duplicated(raw_human$participant_id))
+if (check_human_dup_ids > 0) {
+  stop("CRITICAL: ", check_human_dup_ids, " duplicate participant_id(s) found.")
+} else {
+  cat("Duplicate ID check OK: all participant_ids unique.\n")
+}
+```
+
+## 3.4 Type Conversion, Rename, Drop PVQ
+
+```{r}
+#| label: clean-human
+#| include: false
+
+# ── All columns named explicitly — upstream rename breaks loudly here ─────────
+
+d_human_precomp <- raw_human |>
+  dplyr::rename(
+    # Demographics
+    id        = participant_id,
+    gender    = gender,
+    birthyear = birthyear,
+    edu_level = education,
+    # Questionnaire items (aut/com/rel → q_aut/q_com/q_rel naming; comp→com)
+    q_aut_1 = aut1,  q_aut_2 = aut2,  q_aut_3 = aut3,  q_aut_4 = aut4,
+    q_com_1 = comp1, q_com_2 = comp2, q_com_3 = comp3, q_com_4 = comp4,
+    q_rel_1 = rel1,  q_rel_2 = rel2,  q_rel_3 = rel3,  q_rel_4 = rel4,
+    q_rel_5 = rel5,
+    # LLM repeats
+    llm_aut_1 = llm_aut_rep1, llm_aut_2 = llm_aut_rep2, llm_aut_3 = llm_aut_rep3,
+    llm_com_1 = llm_com_rep1, llm_com_2 = llm_com_rep2, llm_com_3 = llm_com_rep3,
+    llm_rel_1 = llm_rel_rep1, llm_rel_2 = llm_rel_rep2, llm_rel_3 = llm_rel_rep3,
+    # Word counts
+    actual_words = wc_total,
+    wc_text_1    = wc_text_1,
+    wc_text_2    = wc_text_2,
+    wc_text_3    = wc_text_3
+  ) |>
+  dplyr::select(-dplyr::starts_with("PVQ")) |>
+  dplyr::mutate(
+    id        = as.character(id),
+    gender    = as.integer(gender),
+    edu_level = as.integer(edu_level),
+    birthyear = as.integer(birthyear),
+    dplyr::across(dplyr::starts_with("q_"),   as.numeric),
+    dplyr::across(dplyr::starts_with("llm_"), as.numeric),
+    actual_words = as.integer(actual_words),
+    wc_text_1    = as.integer(wc_text_1),
+    wc_text_2    = as.integer(wc_text_2),
+    wc_text_3    = as.integer(wc_text_3)
+  )
+
+message("Human data cleaned: ", nrow(d_human_precomp), " rows, ",
+        ncol(d_human_precomp), " columns.")
+```
+
+## 3.5 Age Computation
+
+```{r}
+#| label: compute-age
+#| include: false
+
+STUDY_YEAR <- 2026L
+
+d_human_precomp <- d_human_precomp |>
+  dplyr::mutate(age_year = STUDY_YEAR - birthyear)
+
+stopifnot(
+  "age_year: all in plausible range 18–80" =
+    all(d_human_precomp$age_year >= 18 & d_human_precomp$age_year <= 80, na.rm = TRUE)
+)
+
+message("Age computed: M = ", round(mean(d_human_precomp$age_year), 1),
+        ", range [", min(d_human_precomp$age_year), ", ",
+        max(d_human_precomp$age_year), "]")
+```
+
+## 3.6 Questionnaire Composites
+
+**Item counts:** autonomy = 4 items, competence = 4 items, relatedness
+= **5 items** (rel1–rel5). The relatedness composite for human
+participants therefore averages 5 items, compared to 4 for AI
+surrogates. Both are on the same 1–5 scale.
+
+```{r}
+#| label: compute-q-composites-human
+#| include: false
+
+d_human_precomp <- d_human_precomp |>
+  dplyr::mutate(
+    # 4 items each (same as AI surrogates)
+    q_aut_mean = rowMeans(across(c(q_aut_1, q_aut_2, q_aut_3, q_aut_4)),
+                          na.rm = TRUE),
+    q_com_mean = rowMeans(across(c(q_com_1, q_com_2, q_com_3, q_com_4)),
+                          na.rm = TRUE),
+    # 5 items for humans (rel_5 is the additional item vs AI's 4)
+    q_rel_mean = rowMeans(across(c(q_rel_1, q_rel_2, q_rel_3, q_rel_4, q_rel_5)),
+                          na.rm = TRUE)
+  )
+
+stopifnot(
+  "q_aut_mean in [1, 5]" = all(dplyr::between(d_human_precomp$q_aut_mean, 1, 5), na.rm = TRUE),
+  "q_com_mean in [1, 5]" = all(dplyr::between(d_human_precomp$q_com_mean, 1, 5), na.rm = TRUE),
+  "q_rel_mean in [1, 5]" = all(dplyr::between(d_human_precomp$q_rel_mean, 1, 5), na.rm = TRUE)
+)
+
+message("Q composites computed (4 aut, 4 com, 5 rel items).")
+```
+
+## 3.7 LLM Composite Means
+
+```{r}
+#| label: compute-llm-composites-human
+#| include: false
+
+d_human_precomp <- d_human_precomp |>
+  dplyr::mutate(
+    llm_aut_mean = rowMeans(across(c(llm_aut_1, llm_aut_2, llm_aut_3)), na.rm = TRUE),
+    llm_com_mean = rowMeans(across(c(llm_com_1, llm_com_2, llm_com_3)), na.rm = TRUE),
+    llm_rel_mean = rowMeans(across(c(llm_rel_1, llm_rel_2, llm_rel_3)), na.rm = TRUE)
+  )
+
+stopifnot(
+  "llm_aut_mean in [1, 5]" = all(dplyr::between(d_human_precomp$llm_aut_mean, 1, 5), na.rm = TRUE),
+  "llm_com_mean in [1, 5]" = all(dplyr::between(d_human_precomp$llm_com_mean, 1, 5), na.rm = TRUE),
+  "llm_rel_mean in [1, 5]" = all(dplyr::between(d_human_precomp$llm_rel_mean, 1, 5), na.rm = TRUE)
+)
+
+# Final clean human dataset (all item-level columns preserved for d_human_clean)
+d_human_clean <- d_human_precomp |>
+  dplyr::mutate(id_type = "HU",
+                condition    = "short-3",
+                text_count   = 3L,
+                target_words = 50L)
+
+message("LLM composites computed. d_human_clean: ", nrow(d_human_clean),
+        " human participants.")
+```
+
+---
+
+# 4 Merge AI + Human
+
+## 4.1 Matched AI Condition
+
+`d_rq3_ai.rds` was filtered to short-3 (target_words = 50, text_count
+= 3) in `10_RQ2_data.qmd`. Verify the condition before merging.
+
+```{r}
+#| label: verify-ai-condition
+#| include: false
+
+stopifnot(
+  "d_rq3_ai: only short-3 condition" =
+    all(d_rq3_ai$condition == "short-3"),
+  "d_rq3_ai: target_words = 50" =
+    all(d_rq3_ai$target_words == 50L),
+  "d_rq3_ai: text_count = 3" =
+    all(d_rq3_ai$text_count == 3L),
+  "d_rq3_ai: id_type = AI" =
+    all(d_rq3_ai$id_type == "AI")
+)
+
+message("AI condition verified: short-3 (target_words=50, text_count=3), N = ",
+        n_distinct(d_rq3_ai$id), " surrogates.")
+```
+
+## 4.2 Merge
+
+```{r}
+#| label: merge-ai-human
+#| include: false
+
+# Select only the columns needed for RQ3 analyses (+ condition metadata)
+# text_count is factor in d_rq3_ai (from 10_RQ2_data pipeline) but integer in
+# d_human_clean; coerce via character to preserve the numeric value, not the level index
+d_ai_for_merge <- d_rq3_ai |>
+  dplyr::mutate(text_count = as.integer(as.character(text_count))) |>
+  dplyr::select(id, id_type, llm_aut_mean, llm_com_mean, llm_rel_mean,
+                q_aut_mean, q_com_mean, q_rel_mean, actual_words,
+                condition, text_count, target_words)
+
+d_hu_for_merge <- d_human_clean |>
+  dplyr::select(id, id_type, llm_aut_mean, llm_com_mean, llm_rel_mean,
+                q_aut_mean, q_com_mean, q_rel_mean, actual_words,
+                condition, text_count, target_words)
+
+d_rq3_merged <- dplyr::bind_rows(d_ai_for_merge, d_hu_for_merge)
+
+stopifnot(
+  "merged: rows = AI + human" =
+    nrow(d_rq3_merged) == nrow(d_ai_for_merge) + nrow(d_hu_for_merge),
+  "merged: exactly two id_type groups" =
+    n_distinct(d_rq3_merged$id_type) == 2L,
+  "merged: AI group present" =
+    "AI" %in% d_rq3_merged$id_type,
+  "merged: HU group present" =
+    "HU" %in% d_rq3_merged$id_type,
+  "merged: no missing LLM means" =
+    !anyNA(d_rq3_merged[, c("llm_aut_mean", "llm_com_mean", "llm_rel_mean")]),
+  "merged: no missing Q means" =
+    !anyNA(d_rq3_merged[, c("q_aut_mean", "q_com_mean", "q_rel_mean")])
+)
+
+N_AI <- sum(d_rq3_merged$id_type == "AI")
+N_HU <- sum(d_rq3_merged$id_type == "HU")
+
+message("Merge complete: ", N_AI, " AI + ", N_HU, " human = ",
+        nrow(d_rq3_merged), " total rows.")
+```
+
+## 4.3 Word Count Match Verification
+
+```{r}
+#| label: tbl-wordcount-match
+#| echo: false
+#| tbl-cap: "Word Count Comparison: AI Surrogates (Short-3) vs Human Participants"
+
+d_rq3_merged |>
+  dplyr::group_by(id_type) |>
+  dplyr::summarise(
+    N   = dplyr::n(),
+    M   = round(mean(actual_words, na.rm = TRUE), 1),
+    SD  = round(sd(actual_words,   na.rm = TRUE), 1),
+    Mdn = round(median(actual_words, na.rm = TRUE), 0),
+    Min = min(actual_words, na.rm = TRUE),
+    Max = max(actual_words, na.rm = TRUE),
+    .groups = "drop"
+  ) |>
+  dplyr::mutate(id_type = dplyr::recode(id_type, "AI" = LABEL_AI, "HU" = LABEL_HU)) |>
+  dplyr::rename(!!LABEL_SAMPLE := id_type) |>
+  flextable() |>
+  style_apa7() |>
+  add_apa_note(paste0(
+    "Actual words = total word count across all 3 scored texts. ",
+    "AI surrogates: short-3 condition (target = 50 words per text, 3 texts). ",
+    "Human participants wrote 3 texts targeting ~50 words each."
+  ))
+```
+
+---
+
+# 5 Descriptives: Demographics (Human)
+
+```{r}
+#| label: tbl-demo-human
+#| echo: false
+#| tbl-cap: "Human Participant Demographics"
+
+# Gender labels: 1 = male, 2 = female, 3 = other/non-binary (verify against survey)
+gender_labels <- c("1" = "Male", "2" = "Female", "3" = "Other / non-binary")
+
+gender_tbl <- d_human_clean |>
+  dplyr::count(gender) |>
+  dplyr::mutate(
+    gender_label = dplyr::recode(as.character(gender),
+                                 !!!gender_labels, .default = paste("Code", gender)),
+    pct = round(100 * n / sum(n), 1),
+    gender_str = paste0(gender_label, ": n = ", n, " (", pct, "%)")
+  ) |>
+  dplyr::pull(gender_str) |>
+  paste(collapse = "; ")
+
+# Education levels (1–7+ scale; labels should be verified against survey codebook)
+edu_tbl <- d_human_clean |>
+  dplyr::count(edu_level) |>
+  dplyr::arrange(edu_level) |>
+  dplyr::mutate(
+    pct = round(100 * n / sum(n), 1),
+    edu_str = paste0("Level ", edu_level, ": n = ", n, " (", pct, "%)")
+  ) |>
+  dplyr::pull(edu_str) |>
+  paste(collapse = "; ")
+
+tibble::tribble(
+  ~Characteristic,            ~Value,
+  "N",                        as.character(nrow(d_human_clean)),
+  "Age: M (SD)",              sprintf("%.1f (%.1f)", mean(d_human_clean$age_year),
+                                      sd(d_human_clean$age_year)),
+  "Age: range",               sprintf("[%d, %d]", min(d_human_clean$age_year),
+                                      max(d_human_clean$age_year)),
+  "Gender distribution",      gender_tbl,
+  "Education distribution",   edu_tbl
+) |>
+  flextable() |>
+  style_apa7() |>
+  add_apa_note(paste0(
+    "Age computed as 2026 − birth year. Gender and education labels based on ",
+    "survey coding scheme — verify against original questionnaire codebook. ",
+    "Education scale: 1 = some high school ... 7 = doctoral degree (verify)."
+  ))
+```
+
+---
+
+# 6 Descriptives: Questionnaire Scores
+
+## 6.1 Summary Table by Group
+
+```{r}
+#| label: tbl-q-desc-bygroup
+#| echo: false
+#| tbl-cap: "Questionnaire Score Descriptives by Group and Need Dimension"
+
+d_rq3_merged |>
+  tidyr::pivot_longer(
+    cols = c(q_aut_mean, q_com_mean, q_rel_mean),
+    names_to = "need_var", values_to = "score"
+  ) |>
+  dplyr::mutate(
+    Need = dplyr::case_when(
+      need_var == "q_aut_mean" ~ TABLE_LABEL_AUT,
+      need_var == "q_com_mean" ~ TABLE_LABEL_COM,
+      need_var == "q_rel_mean" ~ TABLE_LABEL_REL
+    ),
+    Sample = dplyr::recode(id_type, "AI" = LABEL_AI, "HU" = LABEL_HU)
+  ) |>
+  dplyr::group_by(Need, Sample) |>
+  dplyr::summarise(
+    n   = dplyr::n(),
+    M   = round(mean(score, na.rm = TRUE), 2),
+    SD  = round(sd(score, na.rm = TRUE),   2),
+    Mdn = round(median(score, na.rm = TRUE), 2),
+    Min = round(min(score, na.rm = TRUE),   2),
+    Max = round(max(score, na.rm = TRUE),   2),
+    Skew = round(psych::skew(score, na.rm = TRUE), 2),
+    Kurt = round(psych::kurtosi(score, na.rm = TRUE), 2),
+    .groups = "drop"
+  ) |>
+  dplyr::arrange(Need, Sample) |>
+  flextable() |>
+  flextable::merge_v(j = "Need") |>
+  style_apa7() |>
+  add_apa_note(paste0(
+    "All scores on a 1–5 scale. Skew = Fisher's skewness; Kurt = excess kurtosis. ",
+    "Human q_rel_mean averages 5 items; AI q_rel_mean averages 4 items."
+  ))
+```
+
+## 6.2 Distribution by Group
+
+```{r}
+#| label: fig-q-dist-bygroup
+#| echo: false
+#| fig-cap: "Questionnaire Score Distributions by Group and Need Dimension. Violin + boxplot. AI surrogates (blue) vs human participants (red)."
+#| fig-width: 9
+#| fig-height: 4
+#| fig-dpi: 300
+
+d_rq3_merged |>
+  tidyr::pivot_longer(
+    cols = c(q_aut_mean, q_com_mean, q_rel_mean),
+    names_to = "need_var", values_to = "score"
+  ) |>
+  dplyr::mutate(
+    Need   = factor(dplyr::case_when(
+      need_var == "q_aut_mean" ~ TABLE_LABEL_AUT,
+      need_var == "q_com_mean" ~ TABLE_LABEL_COM,
+      need_var == "q_rel_mean" ~ TABLE_LABEL_REL
+    ), levels = NEEDS),
+    Sample = dplyr::recode(id_type, "AI" = LABEL_AI, "HU" = LABEL_HU)
+  ) |>
+  ggplot(aes(x = Sample, y = score, fill = id_type)) +
+  geom_violin(alpha = 0.4, trim = FALSE, linewidth = 0.4) +
+  geom_boxplot(width = 0.18, outlier.size = 0.8, outlier.alpha = 0.5) +
+  scale_fill_manual(values = c("AI" = COL_AI_SINGLE, "HU" = COL_HU_SINGLE),
+                    guide = "none") +
+  scale_y_continuous(limits = c(1, 5), breaks = 1:5) +
+  facet_wrap(~Need, ncol = 3L) +
+  labs(x = NULL, y = "Questionnaire score") +
+  theme_thesis()
+```
+
+---
+
+# 7 Descriptives: LLM Scores
+
+## 7.1 Summary Table by Group
+
+```{r}
+#| label: tbl-llm-desc-bygroup
+#| echo: false
+#| tbl-cap: "LLM Score Descriptives by Group and Need Dimension"
+
+d_rq3_merged |>
+  tidyr::pivot_longer(
+    cols = c(llm_aut_mean, llm_com_mean, llm_rel_mean),
+    names_to = "need_var", values_to = "score"
+  ) |>
+  dplyr::mutate(
+    Need = dplyr::case_when(
+      need_var == "llm_aut_mean" ~ TABLE_LABEL_AUT,
+      need_var == "llm_com_mean" ~ TABLE_LABEL_COM,
+      need_var == "llm_rel_mean" ~ TABLE_LABEL_REL
+    ),
+    Sample = dplyr::recode(id_type, "AI" = LABEL_AI, "HU" = LABEL_HU)
+  ) |>
+  dplyr::group_by(Need, Sample) |>
+  dplyr::summarise(
+    n   = dplyr::n(),
+    M   = round(mean(score, na.rm = TRUE), 2),
+    SD  = round(sd(score, na.rm = TRUE),   2),
+    Mdn = round(median(score, na.rm = TRUE), 2),
+    Min = round(min(score, na.rm = TRUE),   2),
+    Max = round(max(score, na.rm = TRUE),   2),
+    Skew = round(psych::skew(score, na.rm = TRUE), 2),
+    Kurt = round(psych::kurtosi(score, na.rm = TRUE), 2),
+    .groups = "drop"
+  ) |>
+  dplyr::arrange(Need, Sample) |>
+  flextable() |>
+  flextable::merge_v(j = "Need") |>
+  style_apa7() |>
+  add_apa_note(paste0(
+    "LLM score = mean of 3 scoring repeats. All scores on a 1–5 scale. ",
+    "Skew = Fisher's skewness; Kurt = excess kurtosis."
+  ))
+```
+
+## 7.2 LLM Score Distributions by Group
+
+```{r}
+#| label: fig-llm-dist-bygroup
+#| echo: false
+#| fig-cap: "LLM Score Distributions by Group and Need Dimension. Violin + boxplot. AI surrogates (blue) vs human participants (red)."
+#| fig-width: 9
+#| fig-height: 4
+#| fig-dpi: 300
+
+d_rq3_merged |>
+  tidyr::pivot_longer(
+    cols = c(llm_aut_mean, llm_com_mean, llm_rel_mean),
+    names_to = "need_var", values_to = "score"
+  ) |>
+  dplyr::mutate(
+    Need   = factor(dplyr::case_when(
+      need_var == "llm_aut_mean" ~ TABLE_LABEL_AUT,
+      need_var == "llm_com_mean" ~ TABLE_LABEL_COM,
+      need_var == "llm_rel_mean" ~ TABLE_LABEL_REL
+    ), levels = NEEDS),
+    Sample = dplyr::recode(id_type, "AI" = LABEL_AI, "HU" = LABEL_HU)
+  ) |>
+  ggplot(aes(x = Sample, y = score, fill = id_type)) +
+  geom_violin(alpha = 0.4, trim = FALSE, linewidth = 0.4) +
+  geom_boxplot(width = 0.18, outlier.size = 0.8, outlier.alpha = 0.5) +
+  scale_fill_manual(values = c("AI" = COL_AI_SINGLE, "HU" = COL_HU_SINGLE),
+                    guide = "none") +
+  scale_y_continuous(limits = c(1, 5), breaks = 1:5) +
+  facet_wrap(~Need, ncol = 3L) +
+  labs(x = NULL, y = "LLM score") +
+  theme_thesis()
+```
+
+## 7.3 LLM vs Questionnaire Scatter by Group
+
+```{r}
+#| label: fig-llm-q-scatter-bygroup
+#| echo: false
+#| fig-cap: "LLM score vs questionnaire score by group and need dimension. LOESS (solid) and OLS (dashed) overlays. Supports assumption check for RQ3b."
+#| fig-width: 9
+#| fig-height: 6
+#| fig-dpi: 300
+#| warning: false
+
+d_rq3_merged |>
+  tidyr::pivot_longer(
+    cols = c(llm_aut_mean, llm_com_mean, llm_rel_mean,
+             q_aut_mean,   q_com_mean,   q_rel_mean),
+    names_to  = "var", values_to = "score"
+  ) |>
+  dplyr::mutate(
+    instrument = dplyr::if_else(stringr::str_starts(var, "llm_"), "llm", "q"),
+    Need = factor(dplyr::case_when(
+      stringr::str_detect(var, "aut") ~ TABLE_LABEL_AUT,
+      stringr::str_detect(var, "com") ~ TABLE_LABEL_COM,
+      stringr::str_detect(var, "rel") ~ TABLE_LABEL_REL
+    ), levels = NEEDS),
+    Sample = dplyr::recode(id_type, "AI" = LABEL_AI, "HU" = LABEL_HU)
+  ) |>
+  dplyr::select(-var) |>
+  tidyr::pivot_wider(id_cols = c(id, id_type, Need, Sample),
+                     names_from = instrument, values_from = score) |>
+  ggplot(aes(x = llm, y = q, colour = id_type)) +
+  geom_jitter(alpha = 0.25, size = 0.9, width = 0.12, height = 0.12) +
+  geom_smooth(method = "loess", se = FALSE, linewidth = 0.7, formula = y ~ x) +
+  geom_smooth(method = "lm",    se = FALSE, linewidth = 0.5, linetype = "dashed",
+              formula = y ~ x) +
+  scale_colour_manual(values = c("AI" = COL_AI_SINGLE, "HU" = COL_HU_SINGLE),
+                      labels  = c("AI" = LABEL_AI, "HU" = LABEL_HU),
+                      name    = NULL) +
+  scale_x_continuous(limits = c(1, 5), breaks = 1:5) +
+  scale_y_continuous(limits = c(1, 5), breaks = 1:5) +
+  facet_grid(Need ~ Sample) +
+  labs(x = "LLM score", y = "Questionnaire score") +
+  theme_thesis() +
+  theme(strip.text = element_text(size = 9))
+```
+
+---
+
+# 8 Exports
+
+```{r}
+#| label: exports
+#| include: false
+
+# d_rq3_merged: merged AI + human (matched condition), minimal columns for RQ3 analyses
+saveRDS(d_rq3_merged,  file.path(EXPORT_DIR, "d_rq3_merged.rds"))
+
+# d_human_clean: full human dataset including demographics and item-level columns
+saveRDS(d_human_clean, file.path(EXPORT_DIR, "d_human_clean.rds"))
+
+message("Exports complete:")
+message("  d_rq3_merged.rds  — ", nrow(d_rq3_merged), " rows (", N_AI, " AI + ", N_HU, " human)")
+message("  d_human_clean.rds — ", nrow(d_human_clean), " rows")
+```
+
+---
+
+# 9 Session Info
+
+```{r}
+#| label: session-info
+#| include: false
+
+sessionInfo()
+```
