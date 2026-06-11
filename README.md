@@ -10,43 +10,71 @@ Stockholm University — PSMT42 Master's Thesis
 
 This repository contains the data pipeline and analysis code for a thesis investigating whether large language models (LLMs) can infer **basic psychological need satisfaction** (autonomy, competence, relatedness — Self-Determination Theory) from workplace appreciation texts.
 
-The study uses AI-generated surrogate data: synthetic personas write appreciation messages to coworkers, and a separate LLM scorer rates the texts for need satisfaction. Surrogate scores are compared against questionnaire-derived need satisfaction scores for the same personas. A human rater sample provides a parallel reference for comparison.
+The study uses two parallel samples:
 
-**Final sample:** N = 400 personas × 3 text lengths (50/150/300 words) × 3 text counts (1/3/5 texts) × 3 scoring repeats = 10,800 scoring observations.
+- **AI surrogates** *(Caroline Müller)*: Synthetic personas (GPT-5 mini) write appreciation messages to coworkers. A separate LLM scorer (Claude Haiku 4.5) rates the texts for need satisfaction. Surrogate scores are compared against questionnaire-derived need satisfaction scores from the same personas.
+- **Human participants** *(Sebastian Oscarson)*: Human raters provide a parallel reference sample for comparison.
+
+**AI surrogate sample:** N = 400 personas × 3 text lengths (50/150/300 words) × 3 text counts (1/3/5 texts) × 3 scoring repeats = 10,800 scoring observations.
 
 ---
 
 ## Repository Structure
 
 ```
-10_data/          Canonical pipeline outputs (JSONL + CSV + RDS)
-20_scripts/       Python pipeline scripts
-30_prompts/       LLM prompt templates and Pydantic output schemas
-40_analyses/      R/Quarto analysis files (RQ2, RQ3, H1c/d)
-50_humans/        Human rater data and analysis scripts (Sebastian Oscarson)
-config.yaml       Stage configuration (models, prompts, parameters)
-pricing.yaml      Token pricing table (USD/1M tokens)
+10_data/          Canonical pipeline outputs (JSONL + CSV + RDS)  [AI surrogates]
+20_scripts/       Python pipeline scripts                         [AI surrogates]
+30_prompts/       LLM prompt templates and Pydantic schemas       [AI surrogates]
+40_analyses/      R/Quarto analysis files — see breakdown below   [AI surrogates]
+50_humans/        Human rater data and analysis scripts           [Human participants]
+config.yaml       Stage configuration (models, prompts, params)   [AI surrogates]
+pricing.yaml      Token pricing table (USD/1M tokens)             [AI surrogates]
 requirements.txt  Python dependencies
 ```
 
-### 50_humans/
+### 40_analyses/ — AI Surrogate Analyses
+
+**Current files:**
+
+| File | Description |
+|------|-------------|
+| `00_common.R` | Shared setup: libraries, constants, APA styling functions |
+| `10_RQ2_data.qmd` | RQ2 data preparation: loading, cleaning, exclusions |
+| `20_RQ2_analyses.qmd` | RQ2: convergent validity of LLM surrogate scores vs questionnaire |
+| `30_RQ3_data.qmd` | RQ3 data preparation |
+| `40_RQ3_analyses.qmd` | RQ3: sensitivity to text length and count conditions |
+| `50_additional_analyses.qmd` | Additional and robustness analyses |
+
+**Archived files** (`version1/` subfolder — superseded, kept for reference):
+
+| File | Description |
+|------|-------------|
+| `version1/10_Analyses_RQ2.qmd` | Earlier monolithic RQ2 analysis file |
+| `version1/15_Analyses_H1cd.qmd` | Earlier H1c/d ICC and within-person reliability file |
+| `version1/20_Analyses_RQ3.qmd` | Earlier RQ3 analysis file |
+
+### 50_humans/ — Human Participant Analyses
 
 Contains all materials related to the human rater sample collected and analysed by Sebastian Oscarson:
 
-- `Data_Complete_Run2.csv` — Full human rater dataset (Run 2)
-- `Data_Complete_Run2_flagged.csv` — Same dataset with quality flags applied
-- `Data_Complete_Run2_wc.csv` — Dataset with word count covariates
-- `_Data Human Sample RQ1` — Raw data file for the RQ1 human sample
-- `Descriptives_and_Reliability_v2.R` — Descriptive statistics and reliability analyses
-- `Exclusions_questionnaire.R` — Exclusion criteria and filtering for questionnaire responses
-- `H1a_b_c_+ExplAim_Hypothesis_Tests_v2.R` — Hypothesis tests for H1a, H1b, H1c and exploratory aims
-- `H1b_partial_correlations_Run2.R` — Partial correlation analyses for H1b
-- `H1b_wordcount_covariate_Run2.R` — H1b re-analyses with word count as covariate
-- `Power Simulation (two-tailed).r` — Power simulation script
+| File | Description |
+|------|-------------|
+| `Data_Complete_Run2.csv` | Full human rater dataset (Run 2) |
+| `Data_Complete_Run2_flagged.csv` | Same dataset with quality flags applied |
+| `Data_Complete_Run2_wc.csv` | Dataset with word count covariates |
+| `_Data Human Sample RQ1` | Raw data file for the RQ1 human sample |
+| `Descriptives_and_Reliability_v2.R` | Descriptive statistics and reliability analyses |
+| `Exclusions_questionnaire.R` | Exclusion criteria and filtering for questionnaire responses |
+| `H1a_b_c_+ExplAim_Hypothesis_Tests_v2.R` | Hypothesis tests for H1a, H1b, H1c and exploratory aims |
+| `H1b_partial_correlations_Run2.R` | Partial correlation analyses for H1b |
+| `H1b_wordcount_covariate_Run2.R` | H1b re-analyses with word count as covariate |
+| `Power Simulation (two-tailed).r` | Power simulation script |
 
 ---
 
 ## Pipeline Stages
+
+> All pipeline stages concern the **AI surrogate** sample.
 
 | Stage | Script | Input | Output | Description |
 |-------|--------|-------|--------|-------------|
@@ -68,17 +96,28 @@ Contains all materials related to the human rater sample collected and analysed 
 
 ## Reproducing the Analyses
 
+### AI Surrogate Analyses
+
 The final merged analysis file is at:
 ```
 10_data/70_merge_outputs_20260412-1426.csv
 ```
 
-Open the Quarto files in RStudio:
-- `40_analyses/10_Analyses_RQ2.qmd` — RQ2: convergent validity of LLM surrogate scores
-- `40_analyses/20_Analyses_RQ3.qmd` — RQ3: sensitivity to text length and count conditions
-- `40_analyses/15_Analyses_H1cd.qmd` — H1c/d: ICC and within-person reliability
+Open the Quarto files in RStudio (render in order):
 
-The RQ3 and H1c/d analyses also read pre-computed objects from `10_data/80_analyses_exports/`.
+```
+40_analyses/10_RQ2_data.qmd            ← run first (data prep for RQ2)
+40_analyses/20_RQ2_analyses.qmd        ← RQ2: LLM surrogate convergent validity
+40_analyses/30_RQ3_data.qmd            ← run first (data prep for RQ3)
+40_analyses/40_RQ3_analyses.qmd        ← RQ3: sensitivity to text length/count
+40_analyses/50_additional_analyses.qmd ← additional and robustness analyses
+```
+
+Pre-computed bootstrap objects (cached for speed) are in `10_data/80_analyses_exports/`.
+
+### Human Participant Analyses
+
+See `50_humans/` for R scripts. These are independent of the AI surrogate pipeline.
 
 ---
 
@@ -112,7 +151,7 @@ See `config.yaml` for stage definitions, model versions, and prompt references.
 
 ## Data
 
-All pipeline inputs and outputs are included in `10_data/`. Raw source data (SCOPE personas, HuggingFace dataset) is not included — see `20_scripts/00_sample_personas.py` and the [SCOPE dataset](https://huggingface.co/datasets) for reproduction.
+All AI surrogate pipeline inputs and outputs are included in `10_data/`. Raw source data (SCOPE personas, HuggingFace dataset) is not included — see `20_scripts/00_sample_personas.py` and the [SCOPE dataset](https://huggingface.co/datasets) for reproduction.
 
 Human rater data and analysis scripts are in `50_humans/`.
 
